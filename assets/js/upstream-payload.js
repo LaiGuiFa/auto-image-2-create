@@ -37,3 +37,19 @@ export function buildAsyncPayload({ prompt, size, quality, refImages }) {
   if (imageUrls.length) payload.image_urls = imageUrls;
   return payload;
 }
+
+export function attachRequestMetadata(payload, { providerId } = {}) {
+  return {
+    ...payload,
+    providerId: String(providerId || '').trim(),
+  };
+}
+
+export function buildPollRequestUrl(baseUrl, { providerId } = {}) {
+  const [path, query = ''] = String(baseUrl || '').split('?');
+  const params = new URLSearchParams(query);
+  const normalizedProviderId = String(providerId || '').trim();
+  if (normalizedProviderId) params.set('providerId', normalizedProviderId);
+  const suffix = params.toString();
+  return suffix ? `${path}?${suffix}` : path;
+}

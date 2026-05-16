@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
@@ -64,12 +64,11 @@
                 </svg>
                 <span>清空</span>
               </button>
-              <button type="button" class="prompt-tool-btn" id="polishPromptBtn" title="润色">
+              <button type="button" class="prompt-tool-btn" id="quickPolishPromptBtn" title="Quick Polish">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                  <path d="M12 20h9"/>
-                  <path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4 12.5-12.5z"/>
+                  <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/>
                 </svg>
-                <span>润色</span>
+                <span>Polish</span>
               </button>
               <button type="button" class="prompt-tool-btn" id="openHistoryBtn" title="历史">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -300,6 +299,14 @@
       </div>
       <div class="modal-body">
 
+        <!-- Provider -->
+        <div style="margin-bottom:14px;">
+          <div class="modal-field-label">Provider</div>
+          <div class="input-wrap">
+            <select id="providerSelect" class="modal-select"></select>
+          </div>
+        </div>
+
         <!-- API Key -->
         <div id="cndKeySection">
           <div class="modal-field-label" style="display:flex;align-items:center;justify-content:space-between;">
@@ -385,6 +392,7 @@
       </div>
       <div class="modal-footer">
         <button type="button" class="btn-ghost" id="polishCancelBtn">取消</button>
+        <button type="button" class="btn-ghost" id="polishRunBtn">Polish</button>
         <button type="button" class="btn-primary" id="polishApplyBtn">应用到描述</button>
       </div>
     </div>
@@ -482,3 +490,4 @@
   <script type="module" src="assets/js/app.js?v=20260515-polish"></script>
 </body>
 </html>
+

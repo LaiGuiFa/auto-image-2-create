@@ -35,12 +35,29 @@ import {
   parseAspectRatio,
   compareSemver,
 } from './utils.js';
-import { buildAsyncPayload, buildSyncPayload } from './upstream-payload.js';
+import {
+  attachRequestMetadata,
+  buildAsyncPayload,
+  buildPollRequestUrl,
+  buildSyncPayload,
+} from './upstream-payload.js';
 import { createDetailState } from './detail-state.js?v=20260515-detail-info';
 import { createDetailRecordPayload } from './detail-record.js?v=20260515-detail-info';
 import { bindDetailModalEvents, renderDetailModal } from './detail-modal.js?v=20260515-detail-info';
 import { getReferenceImageAddState, makeHistoryReferenceImage } from './ref-images.js?v=20260515-detail-info';
 import { normalizePolishText } from './prompt-polish.js?v=20260515-polish';
+import { normalizeRuntimeConfig, getProviderById } from './runtime-config.js';
+import {
+  KV_SELECTED_PROVIDER,
+  getProviderApiKeyStorageKey,
+  resolveSelectedProvider,
+} from './provider-settings.js';
+import {
+  buildPolishRequest,
+  getPolishButtonLabel,
+  getPolishDisabledState,
+  readPolishResponseText,
+} from './prompt-polish-ui.js';
 import db from './db.js';
 import Viewer from '/vendor/viewerjs/viewer.esm.js';
 
@@ -52,6 +69,10 @@ const state = {
   asyncMode: 'async',           // 'sync' | 'async'；default 异步
   asyncDisabled: false,
   keys: { cnd: '' },
+  providers: [],
+  defaultProviderId: 'cnd',
+  selectedProviderId: 'cnd',
+  deepseekConfigured: false,
   size: '2:3',
   quality: 'high',
   format: 'PNG',
@@ -100,6 +121,8 @@ let _historyRecords = null;
 let _historyModalObjectUrls = [];
 let _detailModalObjectUrls = [];
 let _cacheSizeDirty = true;
+let _settingsDraft = null;
+let _polishLoading = false;
 let _cacheSizeText = '—';
 let _asyncFinalizeRunning = false;
 const _asyncFinalizeQueue = [];
@@ -126,6 +149,92 @@ function setHistoryRecords(records) {
   _historyRecords = Array.isArray(records) ? records : null;
 }
 
+function getSelectedProvider() {
+  return resolveSelectedProvider({
+    providers: state.providers,
+    defaultProviderId: state.defaultProviderId,
+    selectedProviderId: state.selectedProviderId,
+  });
+}
+
+function getProviderApiKey(providerId = state.selectedProviderId) {
+  return state.keys[providerId] || '';
+}
+
+function canUseAsyncForProvider(provider = getSelectedProvider()) {
+  return provider?.supportsAsync !== false;
+}
+
+async function loadRuntimeConfigState() {
+  const fallback = normalizeRuntimeConfig({
+    defaultProviderId: 'cnd',
+    providers: [{
+      id: 'cnd',
+      label: CHANNEL.cnd?.name || 'Image API',
+      supportsAsync: true,
+    }],
+    deepseekConfigured: false,
+    requestTimeoutMs: 0,
+    uploadRetentionDays: 2,
+  });
+  try {
+    const res = await fetch('/api/runtime-config');
+    const json = await res.json();
+    if (!res.ok || json?.ok !== true) throw new Error(json?.error || `HTTP ${res.status}`);
+    applyRuntimeConfig(normalizeRuntimeConfig(json));
+  } catch (error) {
+    applyRuntimeConfig(fallback);
+    console.warn('[runtime config]', error);
+  }
+}
+
+function applyRuntimeConfig(config) {
+  state.providers = config.providers;
+  state.defaultProviderId = config.defaultProviderId;
+  state.deepseekConfigured = config.deepseekConfigured;
+  if (!getProviderById(state.providers, state.selectedProviderId)) {
+    state.selectedProviderId = state.defaultProviderId;
+  }
+  syncRuntimeConfigUi(config);
+}
+
+function syncRuntimeConfigUi(config) {
+  const expireEl = document.getElementById('refUploadExpire');
+  if (expireEl && config.uploadRetentionDays > 0) {
+    expireEl.textContent = String(config.uploadRetentionDays * 24);
+  }
+  syncPolishButtons();
+}
+
+async function hydrateProviderSettings() {
+  if (!db.hasDb()) {
+    state.selectedProviderId = state.defaultProviderId;
+    return;
+  }
+  for (const provider of state.providers) {
+    const key = await db.kvGet(getProviderApiKeyStorageKey(provider.id));
+    if (key) state.keys[provider.id] = key;
+  }
+  const legacyKey = await db.kvGet(CHANNEL.cnd.lsKey);
+  if (legacyKey && !state.keys[state.defaultProviderId]) {
+    state.keys[state.defaultProviderId] = legacyKey;
+  }
+  const savedProviderId = await db.kvGet(KV_SELECTED_PROVIDER);
+  const provider = resolveSelectedProvider({
+    providers: state.providers,
+    defaultProviderId: state.defaultProviderId,
+    selectedProviderId: savedProviderId,
+  });
+  state.selectedProviderId = provider?.id || state.defaultProviderId;
+}
+
+function resolveProviderAwareAsyncMode(mode) {
+  const provider = getSelectedProvider();
+  return canUseAsyncForProvider(provider)
+    ? resolveAllowedAsyncMode(mode, state.asyncDisabled)
+    : 'sync';
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Init
 // ─────────────────────────────────────────────────────────────────────────────
@@ -134,6 +243,7 @@ function setHistoryRecords(records) {
   if (verEl) verEl.textContent = VERSION;
 
   await db.init();
+  await loadRuntimeConfigState();
   if (db.hasDb()) {
     // 清理旧渠道遗留的 KV 条目（duomi / custom 渠道已移除）
     try {
@@ -146,12 +256,13 @@ function setHistoryRecords(records) {
     } catch (_) { /* non-critical */ }
     try {
       await db.hydrateState(state, CHANNEL);
+      await hydrateProviderSettings();
       // Restore async mode
       const savedMode = await db.kvGet(KV_ASYNC_MODE);
       if (savedMode === 'sync' || savedMode === 'async') state.asyncMode = savedMode;
       const asyncDisabledRaw = await db.kvGet(KV_ASYNC_DISABLED);
       state.asyncDisabled = asyncDisabledRaw === 'true';
-      state.asyncMode = resolveAllowedAsyncMode(state.asyncMode, state.asyncDisabled);
+      state.asyncMode = resolveProviderAwareAsyncMode(state.asyncMode);
       // Sync mode-specific size vars from restored state (these fields are new, not in DB)
       if (state.sizeMode === 'pixel') {
         if (state.size && state.size.includes('x')) state.pixelSize = state.size;
@@ -217,6 +328,10 @@ function wireEvents() {
   document.getElementById('saveSettingsBtn').addEventListener('click', () => void saveSettings());
   document.getElementById('clearKeyBtn').addEventListener('click', () => void clearCurrentKey());
   document.getElementById('clearRecordsBtn').addEventListener('click', clearAllRecords);
+  document.getElementById('providerSelect').addEventListener('change', syncSettingsDraftProvider);
+  document.getElementById('disableAsyncToggle').addEventListener('change', () => {
+    if (_settingsDraft) _settingsDraft.asyncDisabled = document.getElementById('disableAsyncToggle').checked;
+  });
 
   // Eye toggle button
   const cndEyeBtn = document.getElementById('modalCndEyeBtn');
@@ -225,6 +340,10 @@ function wireEvents() {
   // Enter-to-save on API key input
   const cndKeyEl = document.getElementById('modalCndKey');
   if (cndKeyEl) cndKeyEl.addEventListener('keydown', e => { if (e.key === 'Enter') void saveSettings(); });
+  if (cndKeyEl) cndKeyEl.addEventListener('input', () => {
+    if (!_settingsDraft) return;
+    _settingsDraft.keys[_settingsDraft.providerId] = cndKeyEl.value.trim();
+  });
 
   // Size mode segment
   document.getElementById('sizeModeSeg').addEventListener('click', e => {
@@ -300,7 +419,7 @@ function wireEvents() {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') generate();
   });
   document.getElementById('clearPromptBtn').addEventListener('click', clearPrompt);
-  document.getElementById('polishPromptBtn').addEventListener('click', openPolishModal);
+  document.getElementById('quickPolishPromptBtn').addEventListener('click', () => void quickPolishPrompt());
   document.getElementById('openHistoryBtn').addEventListener('click', openHistoryModal);
 
   // Ref image button + upload modal
@@ -359,6 +478,7 @@ function wireEvents() {
   document.getElementById('polishCloseBtn').addEventListener('click', closePolishModal);
   document.getElementById('polishCancelBtn').addEventListener('click', closePolishModal);
   document.getElementById('polishApplyBtn').addEventListener('click', applyPolishedPrompt);
+  document.getElementById('polishRunBtn').addEventListener('click', () => void runPromptPolish());
   document.getElementById('polishModal').addEventListener('click', e => {
     if (e.target === e.currentTarget) closePolishModal();
   });
@@ -402,7 +522,7 @@ function wireEvents() {
 // Async Mode
 // ─────────────────────────────────────────────────────────────────────────────
 async function setAsyncMode(mode, showToast = false) {
-  const nextMode = resolveAllowedAsyncMode(mode, state.asyncDisabled);
+  const nextMode = resolveProviderAwareAsyncMode(mode);
   if (state.asyncMode === nextMode) return;
   state.asyncMode = nextMode;
   if (db.hasDb()) {
@@ -416,7 +536,8 @@ async function setAsyncMode(mode, showToast = false) {
 }
 
 function syncModeButtons() {
-  const disabled = isAsyncModeDisabled(state.asyncDisabled);
+  const provider = getSelectedProvider();
+  const disabled = isAsyncModeDisabled(state.asyncDisabled) || !canUseAsyncForProvider(provider);
   document.querySelectorAll('#asyncModeSeg [data-async-mode]').forEach(b => {
     const isAsyncBtn = b.dataset.asyncMode === 'async';
     b.classList.toggle('active', b.dataset.asyncMode === state.asyncMode);
@@ -426,7 +547,7 @@ function syncModeButtons() {
 }
 
 function updateKeyStatus() {
-  const hasKey = !!state.keys.cnd;
+  const hasKey = !!getProviderApiKey();
   const dot    = document.getElementById('keyDot');
   const btn    = document.getElementById('settingsBtn');
   dot.classList.toggle('active', hasKey);
@@ -666,15 +787,38 @@ async function processRefUploadFiles(fileList) {
 // Settings Modal
 // ─────────────────────────────────────────────────────────────────────────────
 function openSettings() {
-  document.getElementById('modalCndKey').value = state.keys.cnd;
-  document.getElementById('disableAsyncToggle').checked = state.asyncDisabled;
+  _settingsDraft = {
+    providerId: state.selectedProviderId,
+    keys: { ...state.keys },
+    asyncDisabled: state.asyncDisabled,
+  };
+  syncSettingsModalUi();
   void updateCacheSize();
   document.getElementById('settingsModal').classList.add('open');
   setTimeout(() => document.getElementById('modalCndKey')?.focus(), 60);
 }
 
 function closeSettings() {
+  _settingsDraft = null;
   document.getElementById('settingsModal').classList.remove('open');
+}
+
+function syncSettingsDraftProvider() {
+  if (!_settingsDraft) return;
+  const keyEl = document.getElementById('modalCndKey');
+  if (keyEl) _settingsDraft.keys[_settingsDraft.providerId] = keyEl.value.trim();
+  _settingsDraft.providerId = document.getElementById('providerSelect').value;
+  syncSettingsModalUi();
+}
+
+function syncSettingsModalUi() {
+  if (!_settingsDraft) return;
+  const providerSelect = document.getElementById('providerSelect');
+  providerSelect.innerHTML = state.providers.map(provider =>
+    `<option value="${escapeAttr(provider.id)}">${esc(provider.label)}</option>`).join('');
+  providerSelect.value = _settingsDraft.providerId;
+  document.getElementById('modalCndKey').value = _settingsDraft.keys[_settingsDraft.providerId] || '';
+  document.getElementById('disableAsyncToggle').checked = _settingsDraft.asyncDisabled;
 }
 
 async function saveSettings() {
@@ -682,25 +826,36 @@ async function saveSettings() {
     toast('IndexedDB 不可用，无法保存设置', 'error');
     return;
   }
-  const cndKey = document.getElementById('modalCndKey').value.trim();
+  if (!_settingsDraft) return;
+  _settingsDraft.keys[_settingsDraft.providerId] = document.getElementById('modalCndKey').value.trim();
   const asyncDisabled = document.getElementById('disableAsyncToggle').checked;
-  state.keys.cnd = cndKey;
+  const provider = resolveSelectedProvider({
+    providers: state.providers,
+    defaultProviderId: state.defaultProviderId,
+    selectedProviderId: _settingsDraft.providerId,
+  });
+  state.keys = { ...state.keys, ..._settingsDraft.keys };
+  state.selectedProviderId = provider?.id || state.defaultProviderId;
   state.asyncDisabled = asyncDisabled;
 
   try {
-    if (cndKey) await db.kvSet(CHANNEL.cnd.lsKey, cndKey);
-    else await db.kvRemove(CHANNEL.cnd.lsKey);
+    await Promise.all(state.providers.map(async ({ id }) => {
+      const key = state.keys[id] || '';
+      if (key) await db.kvSet(getProviderApiKeyStorageKey(id), key);
+      else await db.kvRemove(getProviderApiKeyStorageKey(id));
+    }));
     await db.kvSet(KV_ASYNC_DISABLED, String(asyncDisabled));
+    await db.kvSet(KV_SELECTED_PROVIDER, state.selectedProviderId);
+    await db.kvRemove('cnd_ai_use_proxy');
   } catch (e) {
     toast(e.message || '设置保存失败', 'error');
     return;
   }
 
-  if (state.asyncDisabled) {
-    await setAsyncMode('sync');
-  } else {
-    syncModeButtons();
-  }
+  state.asyncMode = resolveProviderAwareAsyncMode(state.asyncMode);
+  await db.kvSet(KV_ASYNC_MODE, state.asyncMode);
+  syncModeButtons();
+  clampCount();
   updateKeyStatus();
   toast('设置已保存', 'success');
   closeSettings();
@@ -708,8 +863,10 @@ async function saveSettings() {
 
 async function clearCurrentKey() {
   if (!confirm('确定清除当前的 API Key？')) return;
-  state.keys.cnd = '';
-  if (db.hasDb()) await db.kvRemove(CHANNEL.cnd.lsKey);
+  const providerId = _settingsDraft?.providerId || state.selectedProviderId;
+  state.keys[providerId] = '';
+  if (_settingsDraft) _settingsDraft.keys[providerId] = '';
+  if (db.hasDb()) await db.kvRemove(getProviderApiKeyStorageKey(providerId));
   const el = document.getElementById('modalCndKey');
   if (el) el.value = '';
   updateKeyStatus();
@@ -1039,7 +1196,7 @@ function createChatRow(prompt, params) {
   // Left: A avatar + images column
   const leftSide = document.createElement('div');
   leftSide.className = 'chat-left';
-  leftSide.innerHTML = `<div class="chat-avatar av-a"><img src="/assets/images/头像.jpg" alt="AI"></div>`;
+  leftSide.innerHTML = `<div class="chat-avatar av-u">U</div>`;
 
   const colImages = document.createElement('div');
   colImages.className = 'chat-col-images';
@@ -1048,7 +1205,7 @@ function createChatRow(prompt, params) {
   // Right: bubble + U avatar
   const rightSide = document.createElement('div');
   rightSide.className = 'chat-right';
-  rightSide.innerHTML = `${buildParamsBubble(prompt, params)}<div class="chat-avatar av-u">✦</div>`;
+  rightSide.innerHTML = `${buildParamsBubble(prompt, params)}<div class="chat-avatar av-a"><img src="/assets/images/头像.jpg" alt="AI"></div>`;
 
   row.appendChild(rightSide);
   row.appendChild(leftSide);
@@ -1899,7 +2056,7 @@ async function resumePausedTask(taskId) {
     }
   }
 
-  schedulePoll(taskId, prompt, compression);
+  schedulePoll(taskId, prompt, compression, stored.providerId);
   updateToolbarBadge();
   toast('已继续轮询', 'info');
 }
@@ -1922,7 +2079,7 @@ async function generate() {
   const prompt      = document.getElementById('prompt').value.trim();
   const compression = parseInt(document.getElementById('compression').value);
 
-  if (!state.keys.cnd) {
+  if (!getProviderApiKey()) {
     toast('请先在设置中配置 API Key', 'error');
     openSettings();
     return;
@@ -1959,6 +2116,8 @@ function resolveSizeForChannel(size, channelId) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function generateSync(prompt, compression) {
   const ch  = CHANNEL.cnd;
+  const provider = getSelectedProvider();
+  const apiKey = getProviderApiKey(provider?.id);
   const btn = document.getElementById('genBtn');
   const startedAt = Date.now();
 
@@ -1981,12 +2140,14 @@ async function generateSync(prompt, compression) {
   scrollToLatest();
 
   try {
-    const body = buildSyncPayload({
+    const body = attachRequestMetadata(buildSyncPayload({
       prompt,
       size: resolveSizeForChannel(state.size, state.channel),
       quality: state.quality,
       count: state.count,
       refImages: state.refImages,
+    }), {
+      providerId: provider?.id || state.defaultProviderId,
     });
     // 实验性参数
     if (state.moderation) body.moderation = 'low';
@@ -1999,7 +2160,7 @@ async function generateSync(prompt, compression) {
       method:  'POST',
       headers: {
         'Content-Type':  'application/json',
-        'Authorization': `Bearer ${state.keys.cnd}`,
+        'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify(body),
     });
@@ -2140,6 +2301,8 @@ function updateSkeletonWithPartial(index, b64) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function generateAsync(prompt, compression) {
   const ch  = CHANNEL.cnd;
+  const provider = getSelectedProvider();
+  const apiKey = getProviderApiKey(provider?.id);
   const btn = document.getElementById('genBtn');
 
   btn.disabled  = true;
@@ -2166,18 +2329,20 @@ async function generateAsync(prompt, compression) {
     scrollToLatest();
 
     for (let i = 0; i < batchN; i++) {
-      const body = buildAsyncPayload({
+      const body = attachRequestMetadata(buildAsyncPayload({
         prompt,
         size: resolveSizeForChannel(state.size, state.channel),
         quality: state.quality,
         refImages: state.refImages,
+      }), {
+        providerId: provider?.id || state.defaultProviderId,
       });
 
       const res  = await fetch(ch.asyncEndpoint, {
         method:  'POST',
         headers: {
           'Content-Type':  'application/json',
-          'Authorization': `Bearer ${state.keys.cnd}`,
+          'Authorization': `Bearer ${apiKey}`,
         },
         body: JSON.stringify(body),
       });
@@ -2208,12 +2373,13 @@ async function generateAsync(prompt, compression) {
           format: state.format,
           count: 1,
         },
+        providerId: provider?.id || state.defaultProviderId,
         submittedAt,
         ts: submittedAt,
       });
       markCacheSizeDirty();
 
-      schedulePoll(taskId, prompt, compression);
+      schedulePoll(taskId, prompt, compression, provider?.id || state.defaultProviderId);
     }
 
     updateToolbarBadge();
@@ -2237,24 +2403,25 @@ async function generateAsync(prompt, compression) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Polling
 // ─────────────────────────────────────────────────────────────────────────────
-function schedulePoll(taskId, prompt, compression) {
+function schedulePoll(taskId, prompt, compression, providerId = state.selectedProviderId) {
   const poll = state.pendingPolls.get(taskId);
   if (!poll) return;
 
-  const tid = setTimeout(() => doPoll(taskId, prompt, compression), pollDelayForTask(taskId));
+  const tid = setTimeout(() => doPoll(taskId, prompt, compression, providerId), pollDelayForTask(taskId));
   poll.timerId = tid;
 }
 
-async function doPoll(taskId, prompt, compression) {
+async function doPoll(taskId, prompt, compression, providerId = state.selectedProviderId) {
   const poll = state.pendingPolls.get(taskId);
   if (!poll) return;   // task was cancelled
 
   poll.attempts++;
   const ch = CHANNEL.cnd;
+  const pollUrl = buildPollRequestUrl(`${ch.asyncPollBase}${taskId}`, { providerId });
 
   try {
-    const res  = await fetch(`${ch.asyncPollBase}${taskId}`, {
-      headers: { 'Authorization': `Bearer ${state.keys.cnd}` },
+    const res  = await fetch(pollUrl, {
+      headers: { 'Authorization': `Bearer ${getProviderApiKey(providerId)}` },
     });
     const json = await res.json();
     if (!res.ok) throw new Error(json?.error?.message || `HTTP ${res.status}`);
@@ -2265,13 +2432,13 @@ async function doPoll(taskId, prompt, compression) {
     if (status === 'queued') {
       updatePendingStatus(poll.cardId, '排队中', '');
       if (poll.attempts >= POLL_MAX) throw new Error('任务超时，请稍后刷新页面重试');
-      schedulePoll(taskId, prompt, compression);
+      schedulePoll(taskId, prompt, compression, providerId);
 
     } else if (status === 'in_progress') {
       const pct = Math.min(88, Math.round(Math.sqrt(poll.attempts / POLL_MAX) * 110));
       updatePendingStatus(poll.cardId, '进行中', pct + '%', pct);
       if (poll.attempts >= POLL_MAX) throw new Error('任务超时，请稍后刷新页面重试');
-      schedulePoll(taskId, prompt, compression);
+      schedulePoll(taskId, prompt, compression, providerId);
 
     } else if (status === 'completed') {
       const imageUrl = json.metadata?.url;
@@ -2287,7 +2454,7 @@ async function doPoll(taskId, prompt, compression) {
       // unknown — keep polling
       updatePendingStatus(poll.cardId, '处理中', '');
       if (poll.attempts >= POLL_MAX) throw new Error('任务超时，请稍后刷新页面重试');
-      schedulePoll(taskId, prompt, compression);
+      schedulePoll(taskId, prompt, compression, providerId);
     }
 
   } catch (err) {
@@ -2439,7 +2606,7 @@ async function resumePendingTasks() {
       } else {
         registerPendingTask(taskId, cardId, 0);
         updatePendingStatus(cardId, '排队中', '');
-        setTimeout(() => doPoll(taskId, task.prompt, compression), 1500);
+        setTimeout(() => doPoll(taskId, task.prompt, compression, task.providerId), 1500);
       }
     }
   }
@@ -2589,11 +2756,66 @@ function openPolishModal() {
   const editor = document.getElementById('polishEditor');
   editor.innerText = document.getElementById('prompt').value || '';
   document.getElementById('polishModal').classList.add('open');
+  syncPolishButtons();
   setTimeout(() => editor.focus(), 60);
 }
 
 function closePolishModal() {
   document.getElementById('polishModal').classList.remove('open');
+}
+
+function syncPolishButtons() {
+  const quickBtn = document.getElementById('quickPolishPromptBtn');
+  const runBtn = document.getElementById('polishRunBtn');
+  const disabled = getPolishDisabledState({
+    deepseekConfigured: state.deepseekConfigured,
+    loading: _polishLoading,
+  });
+  if (quickBtn) {
+    quickBtn.disabled = disabled;
+    quickBtn.querySelector('span').textContent = getPolishButtonLabel(_polishLoading);
+  }
+  if (runBtn) {
+    runBtn.disabled = disabled;
+    runBtn.textContent = getPolishButtonLabel(_polishLoading);
+  }
+}
+
+async function runPromptPolish() {
+  if (_polishLoading) return;
+  if (!state.deepseekConfigured) {
+    toast('当前服务端未配置 Prompt 润色', 'info');
+    return;
+  }
+  const editor = document.getElementById('polishEditor');
+  const body = buildPolishRequest(editor.innerText || '');
+  if (!body.text) {
+    toast('请输入 Prompt', 'info');
+    return;
+  }
+  _polishLoading = true;
+  syncPolishButtons();
+  try {
+    const res = await fetch('/api/polish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json();
+    if (!res.ok || json?.ok !== true) throw new Error(json?.error || `HTTP ${res.status}`);
+    editor.innerText = readPolishResponseText(json);
+    toast('Prompt 已润色', 'success');
+  } catch (error) {
+    toast(error.message || '润色失败', 'error');
+  } finally {
+    _polishLoading = false;
+    syncPolishButtons();
+  }
+}
+
+async function quickPolishPrompt() {
+  openPolishModal();
+  await runPromptPolish();
 }
 
 function applyPolishedPrompt() {
