@@ -14,6 +14,12 @@ export function resolveProvider(runtimeConfig, providerId) {
 
 export function getProxyTarget(provider, action) {
   if (action === 'sync') return joinProviderUrl(provider.baseUrl, provider.syncPath);
+  if (action === 'edit') {
+    if (!provider.editPath) {
+      throw createProxyError(400, `Image provider "${provider.id}" does not support reference-image edits`);
+    }
+    return joinProviderUrl(provider.baseUrl, provider.editPath);
+  }
   if (action === 'async') return joinProviderUrl(provider.baseUrl, provider.asyncPath);
   throw new Error(`Unknown action: ${action}`);
 }

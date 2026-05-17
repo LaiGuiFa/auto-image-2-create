@@ -27,6 +27,7 @@ const runtimeConfig = {
       label: 'Alpha',
       baseUrl: 'https://alpha.example',
       syncPath: '/sync',
+      editPath: '/edits',
       asyncPath: '/async',
       pollPathBase: '/tasks/',
       supportsAsync: true,
@@ -36,6 +37,7 @@ const runtimeConfig = {
       label: 'Beta',
       baseUrl: 'https://beta.example',
       syncPath: '/sync',
+      editPath: '',
       asyncPath: '',
       pollPathBase: '',
       supportsAsync: false,
@@ -232,6 +234,57 @@ test('provider auth failures return normalized backend payloads', async () => {
   }
 });
 
+test('sync route forwards multipart reference-image requests to the provider edit path', async () => {
+  const calls = [];
+  const app = createApp({
+    runtimeConfig,
+    startupTasks: false,
+    fetchImpl: async (url, options = {}) => {
+      calls.push({
+        url,
+        providerId: options.headers?.['X-Image2-Provider-Id'],
+        contentType: options.headers?.['Content-Type'] || options.headers?.['content-type'] || '',
+        bodyType: options.body?.constructor?.name || typeof options.body,
+      });
+      return new Response(JSON.stringify({
+        data: [{ b64_json: 'aGVsbG8=' }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+  });
+  const { server, baseUrl } = await listen(app);
+
+  try {
+    const form = new FormData();
+    form.append('providerId', 'alpha');
+    form.append('model', 'gpt-image-2');
+    form.append('prompt', 'improve this screenshot');
+    form.append('size', '1024x1024');
+    form.append('quality', 'medium');
+    form.append('image[]', new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }), 'ref.png');
+
+    const res = await fetch(`${baseUrl}/api/image/sync`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer token',
+      },
+      body: form,
+    });
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(calls, [{
+      url: 'https://alpha.example/edits',
+      providerId: 'alpha',
+      contentType: '',
+      bodyType: 'FormData',
+    }]);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test('polish route returns polished text when deepseek is configured', async () => {
   const app = createApp({
     runtimeConfig: {
@@ -307,7 +360,7 @@ test('polish route returns a readable error when upstream responds with a non-js
     assert.equal(res.status, 502);
     assert.deepEqual(await res.json(), {
       ok: false,
-      error: 'DeepSeek ???????????',
+      error: 'DeepSeek returned a non-JSON error response',
     });
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

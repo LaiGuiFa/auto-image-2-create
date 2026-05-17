@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import multer from 'multer';
+import { Blob } from 'node:buffer';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,7 +49,7 @@ export function createApp(options = {}) {
   app.post(ROUTES.upload, upload.single('file'), async (req, res) => {
     const file = req.file;
     if (!file) {
-      res.status(400).json({ ok: false, error: '请选择要上传的图片' });
+      res.status(400).json({ ok: false, error: '璇烽€夋嫨瑕佷笂浼犵殑鍥剧墖' });
       return;
     }
 
@@ -68,15 +69,24 @@ export function createApp(options = {}) {
     res.json({ ok: true, url: publicUrl });
   });
 
-  app.post(ROUTES.imageSync, express.text({ type: 'application/json', limit: '10mb' }), async (req, res) => {
+  app.post(ROUTES.imageSync, imageSyncBodyParser, async (req, res) => {
     const auth = getAuthorizationHeader(req);
     if (!auth) {
       res.status(401).json({ ok: false, error: '缺少 Authorization 请求头' });
       return;
     }
 
-    const rawBody = typeof req.body === 'string' ? req.body : '';
     try {
+      if (Array.isArray(req.files) && req.files.length > 0) {
+        await proxyMultipartImageEdit(req, res, {
+          runtimeConfig,
+          fetchImpl,
+          auth,
+        });
+        return;
+      }
+
+      const rawBody = typeof req.body === 'string' ? req.body : '';
       const metadata = readRequestMetadata(rawBody);
       const provider = resolveProvider(runtimeConfig, metadata.providerId);
       const targetUrl = getProxyTarget(provider, 'sync');
@@ -143,7 +153,7 @@ export function createApp(options = {}) {
   app.get(ROUTES.imagePoll, async (req, res) => {
     const taskId = String(req.query.task_id || '').trim();
     if (!taskId) {
-      res.status(400).json({ ok: false, error: '缺少任务 ID' });
+      res.status(400).json({ ok: false, error: '缂哄皯浠诲姟 ID' });
       return;
     }
 
@@ -181,7 +191,7 @@ export function createApp(options = {}) {
 
     const text = String(req.body?.text || req.body?.prompt || '').trim();
     if (!text) {
-      res.status(400).json({ ok: false, error: '缺少润色文本' });
+      res.status(400).json({ ok: false, error: '缂哄皯娑﹁壊鏂囨湰' });
       return;
     }
 
@@ -219,7 +229,7 @@ export function createApp(options = {}) {
       if (!upstream.ok || !polished) {
         res.status(upstream.status || 502).json({
           ok: false,
-          error: payload?.error?.message || (payload ? 'Prompt ????' : 'DeepSeek ???????????'),
+          error: payload?.error?.message || (payload ? 'Prompt polish failed' : 'DeepSeek returned a non-JSON error response'),
         });
         return;
       }
@@ -231,6 +241,15 @@ export function createApp(options = {}) {
   });
 
   return app;
+}
+
+function imageSyncBodyParser(req, res, next) {
+  const contentType = String(req.get('content-type') || '').toLowerCase();
+  if (contentType.includes('multipart/form-data')) {
+    upload.any()(req, res, next);
+    return;
+  }
+  express.text({ type: 'application/json', limit: '10mb' })(req, res, next);
 }
 
 function getAuthorizationHeader(req) {
@@ -278,10 +297,10 @@ function handleUpstreamError(error, res) {
 
   const detail = error instanceof Error
     ? [error.message, error.cause?.message].filter(Boolean).join(': ')
-    : '上游服务请求失败';
+    : '涓婃父鏈嶅姟璇锋眰澶辫触';
   res.status(502).json({
     ok: false,
-    error: detail || '上游服务请求失败',
+    error: detail || '涓婃父鏈嶅姟璇锋眰澶辫触',
   });
 }
 
@@ -304,4 +323,38 @@ function fetchProvider(url, options, timeoutMs, fetchImpl, providerId, timeoutTy
       'X-Image2-Provider-Id': providerId,
     },
   }, timeoutMs, fetchImpl, timeoutType);
+}
+
+async function proxyMultipartImageEdit(req, res, { runtimeConfig, fetchImpl, auth }) {
+  const metadata = readRequestMetadata('', req.body || {});
+  const provider = resolveProvider(runtimeConfig, metadata.providerId);
+  const targetUrl = getProxyTarget(provider, 'edit');
+  const form = new FormData();
+
+  for (const [key, value] of Object.entries(req.body || {})) {
+    if (key === 'providerId') continue;
+    if (Array.isArray(value)) {
+      value.forEach((item) => form.append(key, String(item)));
+      continue;
+    }
+    if (value != null) {
+      form.append(key, String(value));
+    }
+  }
+
+  for (const file of req.files || []) {
+    const blob = new Blob([file.buffer], { type: String(file.mimetype || 'application/octet-stream') });
+    form.append(file.fieldname, blob, file.originalname || 'reference.png');
+  }
+
+  const upstream = await fetchProvider(targetUrl, {
+    method: 'POST',
+    headers: {
+      Authorization: auth,
+      Accept: 'application/json',
+    },
+    body: form,
+  }, runtimeConfig.requestTimeoutMs, fetchImpl, provider.id, 'provider');
+
+  await proxyJsonResponse(upstream, res);
 }

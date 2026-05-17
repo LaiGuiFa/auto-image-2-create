@@ -18,6 +18,7 @@ test('parseRuntimeConfig normalizes provider and deepseek env config', () => {
         label: 'Alpha',
         baseUrl: 'https://alpha.example',
         syncPath: '/sync',
+        editPath: '/edits',
         asyncPath: '/async',
         pollPathBase: '/tasks/',
         supportsAsync: true,
@@ -44,6 +45,7 @@ test('parseRuntimeConfig normalizes provider and deepseek env config', () => {
   assert.equal(config.uploadRetentionDays, 9);
   assert.equal(config.providers[0].baseUrl, 'https://alpha.example');
   assert.equal(config.providers[0].syncPath, '/sync');
+  assert.equal(config.providers[0].editPath, '/edits');
   assert.equal(config.providers[0].pollPathBase, '/tasks/');
   assert.equal(config.deepseek.enabled, true);
   assert.equal(config.deepseek.url, 'https://deepseek.example/chat');
@@ -225,4 +227,35 @@ test('parseRuntimeConfig treats deepseek as unconfigured when any required field
     DEEPSEEK_API_KEY: 'secret',
     DEEPSEEK_POLISH_SYSTEM_PROMPT: 'polish this',
   }).deepseek.enabled, false);
+});
+
+test('parseRuntimeConfig normalizes DeepSeek base urls to the chat completions endpoint', () => {
+  const baseEnv = {
+    IMAGE_DEFAULT_PROVIDER_ID: 'alpha',
+    IMAGE_PROVIDERS_JSON: JSON.stringify([{
+      id: 'alpha',
+      label: 'Alpha',
+      baseUrl: 'https://alpha.example',
+      syncPath: '/sync',
+      supportsAsync: false,
+    }]),
+    DEEPSEEK_API_KEY: 'secret',
+    DEEPSEEK_MODEL: 'deepseek-v4-flash',
+    DEEPSEEK_POLISH_SYSTEM_PROMPT: 'polish this',
+  };
+
+  assert.equal(parseRuntimeConfig({
+    ...baseEnv,
+    DEEPSEEK_URL: 'https://api.deepseek.com',
+  }).deepseek.url, 'https://api.deepseek.com/chat/completions');
+
+  assert.equal(parseRuntimeConfig({
+    ...baseEnv,
+    DEEPSEEK_URL: 'https://api.deepseek.com/',
+  }).deepseek.url, 'https://api.deepseek.com/chat/completions');
+
+  assert.equal(parseRuntimeConfig({
+    ...baseEnv,
+    DEEPSEEK_URL: 'https://api.deepseek.com/chat/completions',
+  }).deepseek.url, 'https://api.deepseek.com/chat/completions');
 });

@@ -28,7 +28,7 @@ export function parseRuntimeConfig(env = process.env) {
   }
 
   const deepseekApiKey = String(env.DEEPSEEK_API_KEY || '').trim();
-  const deepseekUrl = String(env.DEEPSEEK_URL || '').trim();
+  const deepseekUrl = normalizeDeepseekUrl(String(env.DEEPSEEK_URL || '').trim());
   const deepseekModel = String(env.DEEPSEEK_MODEL || '').trim();
   const deepseekSystemPrompt = String(env.DEEPSEEK_POLISH_SYSTEM_PROMPT || '').trim();
 
@@ -86,6 +86,7 @@ function normalizeProvider(provider, index = 0) {
   const label = String(provider?.label || id).trim();
   const baseUrl = String(provider?.baseUrl || '').trim().replace(/\/+$/, '');
   const syncPath = normalizePathValue(provider?.syncPath);
+  const editPath = normalizePathValue(provider?.editPath);
   const asyncPath = normalizePathValue(provider?.asyncPath);
   const pollPathBase = normalizePathValue(provider?.pollPathBase);
   if (typeof provider?.supportsAsync !== 'boolean') {
@@ -111,6 +112,7 @@ function normalizeProvider(provider, index = 0) {
     label,
     baseUrl,
     syncPath,
+    editPath,
     asyncPath,
     pollPathBase,
     supportsAsync,
@@ -134,4 +136,14 @@ function normalizePathValue(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
   return raw.startsWith('/') ? raw : `/${raw}`;
+}
+
+function normalizeDeepseekUrl(value) {
+  const raw = String(value || '').trim().replace(/\/+$/, '');
+  if (!raw) return '';
+  if (/\/chat\/completions$/i.test(raw)) return raw;
+  if (/^https?:\/\/api\.deepseek\.com$/i.test(raw)) {
+    return `${raw}/chat/completions`;
+  }
+  return raw;
 }

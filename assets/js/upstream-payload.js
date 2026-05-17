@@ -1,5 +1,7 @@
 export function normalizeUpstreamQuality(quality) {
   const q = String(quality || '').toLowerCase();
+  if (q === 'low') return 'low';
+  if (q === 'medium') return 'medium';
   if (q === 'high') return 'high';
   return 'medium';
 }
@@ -8,6 +10,10 @@ function collectImageUrls(refImages) {
   return (Array.isArray(refImages) ? refImages : [])
     .map(item => item?.url)
     .filter(url => typeof url === 'string' && url.trim());
+}
+
+export function hasReferenceImages(refImages) {
+  return collectImageUrls(refImages).length > 0;
 }
 
 export function buildSyncPayload({ prompt, size, quality, count, refImages }) {
@@ -19,9 +25,6 @@ export function buildSyncPayload({ prompt, size, quality, count, refImages }) {
     response_format: 'b64_json',
     n: Math.max(1, Number(count) || 1),
   };
-
-  const imageUrls = collectImageUrls(refImages);
-  if (imageUrls.length) payload.image_urls = imageUrls;
   return payload;
 }
 

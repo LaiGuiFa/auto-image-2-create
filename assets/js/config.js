@@ -1,4 +1,4 @@
-export const VERSION = '1.2.7';
+export const VERSION = '1.5.16';
 
 export const KV_ASYNC_MODE = 'cnd_ai_async_mode';
 export const KV_ASYNC_DISABLED = 'cnd_ai_async_disabled';

@@ -1,4 +1,4 @@
-# Image Workspace
+# 创意工坊
 
 基于模型商 URL 和 API Key 的生图工作台。
 

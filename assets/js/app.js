@@ -40,6 +40,7 @@ import {
   buildAsyncPayload,
   buildPollRequestUrl,
   buildSyncPayload,
+  hasReferenceImages,
 } from './upstream-payload.js';
 import { createDetailState } from './detail-state.js?v=20260515-detail-info';
 import { createDetailRecordPayload } from './detail-record.js?v=20260515-detail-info';
@@ -73,15 +74,15 @@ const state = {
   defaultProviderId: 'cnd',
   selectedProviderId: 'cnd',
   deepseekConfigured: false,
-  size: '2:3',
-  quality: 'high',
+  size: '1:1',
+  quality: 'low',
   format: 'PNG',
   compression: 100,
   count: 1,
   loading: false,          // true only while a sync request is in flight
   refImages: [],
   sizeMode: 'ratio',  // 'ratio' | 'pixel'
-  ratioSize: '2:3',        // last explicit ratio selection (independent of pixel mode)
+  ratioSize: '1:1',        // last explicit ratio selection (independent of pixel mode)
   pixelSize: '1024x1792',  // last explicit pixel selection (independent of ratio mode)
   moderation:    false,    // 当前接口：true = 开启 moderation 参数
   streamEnabled: false,    // 当前接口：流式 + partial_images
@@ -1387,6 +1388,38 @@ async function materializeStoredImages(images, fmt) {
   return rows.filter(Boolean);
 }
 
+async function readReferenceImageBlob(refImage) {
+  const sourceUrl = String(refImage?.url || '').trim();
+  if (!sourceUrl) {
+    throw new Error('Reference image is missing a readable source');
+  }
+  const res = await fetch(sourceUrl);
+  if (!res.ok) {
+    throw new Error(`Failed to read reference image: HTTP ${res.status}`);
+  }
+  return await res.blob();
+}
+
+async function buildReferenceEditFormData({ prompt, size, quality, count, refImages, providerId }) {
+  const form = new FormData();
+  form.append('providerId', String(providerId || '').trim());
+  form.append('model', 'gpt-image-2');
+  form.append('prompt', prompt);
+  form.append('size', size);
+  form.append('quality', quality);
+  form.append('response_format', 'b64_json');
+  form.append('n', String(Math.max(1, Number(count) || 1)));
+
+  for (let i = 0; i < refImages.length; i++) {
+    const refImage = refImages[i];
+    const blob = await readReferenceImageBlob(refImage);
+    const name = String(refImage?.name || `reference-${i + 1}.png`).trim() || `reference-${i + 1}.png`;
+    form.append('image[]', blob, name);
+  }
+
+  return form;
+}
+
 function collectUpstreamActualParams(source) {
   const actual = {};
   if (typeof source?.size === 'string' && source.size) actual.size = source.size;
@@ -1699,7 +1732,7 @@ async function loadRecordsToCanvas() {
   document.getElementById('toolbarTitle').textContent =
     rendered >= CANVAS_INITIAL_IMAGE_LIMIT
       ? `最近记录（仅显示最近 ${rendered} 张）`
-      : 'Image Generator Workspace';
+      : '图像生成工作台';
   updateCumulativeTokens();
 
   requestAnimationFrame(() => scrollToLatest(true));
@@ -2140,6 +2173,7 @@ async function generateSync(prompt, compression) {
   scrollToLatest();
 
   try {
+    const hasRefs = hasReferenceImages(state.refImages);
     const body = attachRequestMetadata(buildSyncPayload({
       prompt,
       size: resolveSizeForChannel(state.size, state.channel),
@@ -2156,14 +2190,28 @@ async function generateSync(prompt, compression) {
       body.partial_images = 2;
     }
 
-    const res  = await fetch(ch.endpoint, {
-      method:  'POST',
+    const requestInit = {
+      method: 'POST',
       headers: {
-        'Content-Type':  'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
-      body: JSON.stringify(body),
-    });
+      body: null,
+    };
+    if (hasRefs) {
+      requestInit.body = await buildReferenceEditFormData({
+        prompt,
+        size: resolveSizeForChannel(state.size, state.channel),
+        quality: body.quality,
+        count: body.n,
+        refImages: state.refImages,
+        providerId: provider?.id || state.defaultProviderId,
+      });
+    } else {
+      requestInit.headers['Content-Type'] = 'application/json';
+      requestInit.body = JSON.stringify(body);
+    }
+
+    const res  = await fetch(ch.endpoint, requestInit);
 
     let json;
     if (state.streamEnabled && (res.headers.get('content-type') || '').includes('text/event-stream')) {
