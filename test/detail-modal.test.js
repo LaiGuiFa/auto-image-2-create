@@ -17,10 +17,14 @@ test('detail modal html renders image, prompt, revised prompt, and params', () =
   });
 
   assert.match(html, /detail-preview-image/);
-  assert.match(html, /上游改写后 Prompt/);
+  assert.match(html, /自动优化/);
   assert.match(html, /1536x1024/);
-  assert.match(html, /生成时长/);
-  assert.doesNotMatch(html, /<div class="detail-param-label">时间<\/div>/);
+  assert.match(html, /记录信息/);
+  assert.match(html, /12\.8 秒/);
+  assert.match(html, /detail-section-head/);
+  assert.doesNotMatch(html, /<div class="detail-param-label">状态<\/div>/);
+  assert.doesNotMatch(html, /<div class="detail-param-label">分辨率<\/div>/);
+  assert.doesNotMatch(html, /<div class="detail-param-label">生成时长<\/div>/);
 });
 
 test('detail modal shows page info for multi-image records', () => {

@@ -5,9 +5,11 @@ export const __filename = fileURLToPath(import.meta.url);
 export const __dirname = path.dirname(__filename);
 export const ROOT_DIR = path.resolve(__dirname, '..');
 export const UPLOAD_DIR = path.join(ROOT_DIR, 'uploads');
+export const COLLECTION_DIR = path.join(ROOT_DIR, 'collection');
 
 export const ROUTES = {
   upload: '/api/upload',
+  collection: '/api/collection',
   runtimeConfig: '/api/runtime-config',
   imageSync: '/api/image/sync',
   imageAsync: '/api/image/async',

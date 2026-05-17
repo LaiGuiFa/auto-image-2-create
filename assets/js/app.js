@@ -120,6 +120,9 @@ let _activeSyncRow = null;
 let _historyGalleryPage = 1;
 let _historyRecords = null;
 let _historyModalObjectUrls = [];
+let _historyPanelObjectUrls = [];
+let _collectionItems = [];
+let _collectionMap = new Map();
 let _detailModalObjectUrls = [];
 let _cacheSizeDirty = true;
 let _settingsDraft = null;
@@ -141,6 +144,11 @@ function resetHistoryModalObjectUrls() {
   _historyModalObjectUrls = [];
 }
 
+function resetHistoryPanelObjectUrls() {
+  _historyPanelObjectUrls.forEach(revokeObjectUrl);
+  _historyPanelObjectUrls = [];
+}
+
 function resetDetailModalObjectUrls() {
   _detailModalObjectUrls.forEach(revokeObjectUrl);
   _detailModalObjectUrls = [];
@@ -148,6 +156,134 @@ function resetDetailModalObjectUrls() {
 
 function setHistoryRecords(records) {
   _historyRecords = Array.isArray(records) ? records : null;
+}
+
+function getPromptElements() {
+  return [
+    document.getElementById('promptBottom'),
+  ].filter(Boolean);
+}
+
+function getPromptValue() {
+  return document.getElementById('promptBottom')?.value ?? '';
+}
+
+function syncPromptValue(value) {
+  for (const el of getPromptElements()) {
+    if (el.value !== value) el.value = value;
+  }
+  updateCharCount();
+}
+
+function syncComposerSummary() {
+  const ratioEl = document.getElementById('composerRatio');
+  const qualityEl = document.getElementById('composerQuality');
+  const formatEl = document.getElementById('composerFormat');
+  const refsEl = document.getElementById('composerRefs');
+  if (ratioEl) ratioEl.textContent = state.size || 'auto';
+  if (qualityEl) qualityEl.textContent = state.quality || '-';
+  if (formatEl) formatEl.textContent = state.format || '-';
+  if (refsEl) refsEl.textContent = `参考图 ${state.refImages.length}`;
+}
+
+function collectionKey(recordId, imageIndex) {
+  return `${recordId || ''}:${Number(imageIndex) || 0}`;
+}
+
+function isCollected(recordId, imageIndex) {
+  return _collectionMap.has(collectionKey(recordId, imageIndex));
+}
+
+function syncPromptToolButtons() {
+  const map = [
+    ['clearPromptBtn', clearPrompt],
+    ['clearPromptBtnBottom', clearPrompt],
+    ['quickPolishPromptBtn', () => void quickPolishPrompt()],
+    ['quickPolishPromptBtnBottom', () => void quickPolishPrompt()],
+    ['refImageBtn', handleRefImageBtnClick],
+    ['refImageBtnBottom', handleRefImageBtnClick],
+  ];
+  for (const [id, handler] of map) {
+    const btn = document.getElementById(id);
+    if (btn && !btn.dataset.bound) {
+      btn.addEventListener('click', handler);
+      btn.dataset.bound = '1';
+    }
+  }
+}
+
+function syncPromptInputEvents() {
+  const bottom = document.getElementById('promptBottom');
+  if (bottom && !bottom.dataset.bound) {
+    bottom.addEventListener('input', () => syncPromptValue(bottom.value));
+    bottom.addEventListener('keydown', e => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') generate();
+    });
+    bottom.dataset.bound = '1';
+  }
+}
+
+function sortCollectionItems(items) {
+  return [...(Array.isArray(items) ? items : [])].sort((a, b) => {
+    const left = String(b?.filename || b?.id || '').trim();
+    const right = String(a?.filename || a?.id || '').trim();
+    return left.localeCompare(right);
+  });
+}
+
+async function loadCollections() {
+  try {
+    const res = await fetch('/api/collection');
+    const json = await res.json();
+    if (!res.ok || json?.ok !== true) throw new Error(json?.error || `HTTP ${res.status}`);
+    _collectionItems = sortCollectionItems(json.items);
+    _collectionMap = new Map(_collectionItems.map(item => [collectionKey(item.recordId, item.imageIndex), item]));
+  } catch (error) {
+    console.warn('[collections]', error);
+    _collectionItems = [];
+    _collectionMap = new Map();
+  }
+}
+
+async function renderCollectionPanel() {
+  const body = document.getElementById('collectionPanelBody');
+  if (!body) return;
+  if (!_collectionItems.length) {
+    body.innerHTML = `<div class="collection-panel-empty">暂无收藏</div>`;
+    return;
+  }
+  const items = _collectionItems.slice(0, 8);
+  body.innerHTML = items.map(item => `
+    <div class="collection-panel-item" data-id="${escapeAttr(item.id)}">
+      <img src="${escapeAttr(item.url)}" alt="" loading="lazy" />
+      <div class="collection-panel-item-meta">
+        <div class="collection-panel-item-title" title="${escapeAttr(item.prompt || '')}">${esc(item.prompt || '已收藏图片')}</div>
+      </div>
+    </div>
+  `).join('');
+  body.querySelectorAll('.collection-panel-item').forEach(node => {
+    node.addEventListener('click', () => {
+      const itemIndex = _collectionItems.findIndex(x => x.id === node.dataset.id);
+      if (itemIndex >= 0) openLightbox(_collectionItems.map(item => item.url), itemIndex, { showPagerArrows: true });
+    });
+  });
+}
+
+async function refreshCollections() {
+  await loadCollections();
+  await renderCollectionPanel();
+  syncCollectionStarStates();
+}
+
+function syncCollectionStarStates() {
+  document.querySelectorAll('.image-fav-btn').forEach(btn => {
+    const card = btn.closest('.image-card');
+    const recId = card?.dataset?.recId;
+    const imgIdx = parseInt(card?.dataset?.imgIdx || '0', 10) || 0;
+    const collected = isCollected(recId, imgIdx);
+    btn.classList.toggle('active', collected);
+    btn.title = collected ? '取消收藏' : '收藏';
+  });
 }
 
 function getSelectedProvider() {
@@ -292,6 +428,8 @@ function resolveProviderAwareAsyncMode(mode) {
   syncFormatSection();
   syncCompressionSection();
   syncExperimentalSection();
+  syncPromptValue(document.getElementById('promptBottom')?.value || '');
+  syncComposerSummary();
 
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
   const hint  = document.getElementById('shortcutHint');
@@ -301,6 +439,8 @@ function resolveProviderAwareAsyncMode(mode) {
 
   await loadRecordsToCanvas();
   updateCumulativeTokens();
+  void renderHistoryPanel();
+  await refreshCollections();
 
   await maybeShowReleaseNotes();
 
@@ -415,16 +555,10 @@ function wireEvents() {
   document.getElementById('plusBtn').addEventListener('click',  () => adjustCount(1));
 
   // Prompt
-  document.getElementById('prompt').addEventListener('input', updateCharCount);
-  document.getElementById('prompt').addEventListener('keydown', e => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') generate();
-  });
-  document.getElementById('clearPromptBtn').addEventListener('click', clearPrompt);
-  document.getElementById('quickPolishPromptBtn').addEventListener('click', () => void quickPolishPrompt());
-  document.getElementById('openHistoryBtn').addEventListener('click', openHistoryModal);
+  syncPromptInputEvents();
+  syncPromptToolButtons();
 
   // Ref image button + upload modal
-  document.getElementById('refImageBtn').addEventListener('click', handleRefImageBtnClick);
   document.getElementById('refUploadInput').addEventListener('change', function () {
     // 必须先复制 FileList：清空 value 后部分浏览器会清空同一 FileList，导致无法上传
     const files = this.files && this.files.length ? Array.from(this.files) : [];
@@ -462,6 +596,12 @@ function wireEvents() {
   // Toolbar
   document.getElementById('clearBtn').addEventListener('click', clearCanvas);
   document.getElementById('toolbarBadge').addEventListener('click', openHistoryModal);
+  document.getElementById('historyPanelBtn').addEventListener('click', openHistoryModal);
+  document.getElementById('collectionPanelBtn').addEventListener('click', () => {
+    const first = _collectionItems[0];
+    if (first) openLightbox(_collectionItems.map(item => item.url), 0, { showPagerArrows: true });
+    else toast('暂无收藏', 'info');
+  });
 
   // Detail modal
   document.getElementById('detailCloseBtn').addEventListener('click', closeDetailModal);
@@ -557,11 +697,13 @@ function updateKeyStatus() {
 }
 
 function updateRefImageButton() {
-  const btn = document.getElementById('refImageBtn');
-  if (!btn) return;
-  btn.classList.add('ref-supported');
-  btn.classList.remove('ref-disabled');
-  btn.title = '添加参考图';
+  ['refImageBtn', 'refImageBtnBottom'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    btn.classList.add('ref-supported');
+    btn.classList.remove('ref-disabled');
+    btn.title = '添加参考图';
+  });
 }
 
 function handleRefImageBtnClick() {
@@ -919,6 +1061,7 @@ function applySize(value) {
   }
   document.getElementById('customSizeError').textContent = '';
   syncSizeSection();
+  syncComposerSummary();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -950,6 +1093,7 @@ function syncSizeSection() {
   } else {
     syncPixelPanel();
   }
+  syncComposerSummary();
 }
 
 /** 渲染比例 chip 网格（innerHTML，靠父级事件代理响应点击） */
@@ -1031,12 +1175,14 @@ function applyCustomSize() {
   // 取消预设 tile 高亮
   document.querySelectorAll('#pixelPresetGrid .size-option').forEach(el => el.classList.remove('active'));
   toast(`自定义尺寸已应用：${w}×${h}`, 'success');
+  syncComposerSummary();
 }
 
 function selectQuality(el) {
   document.querySelectorAll('[data-q]').forEach(e => e.classList.remove('active'));
   el.classList.add('active');
   state.quality = el.dataset.q;
+  syncComposerSummary();
 }
 
 function selectFormat(el) {
@@ -1044,6 +1190,7 @@ function selectFormat(el) {
   el.classList.add('active');
   state.format = el.dataset.fmt;
   syncCompressionSection();
+  syncComposerSummary();
 }
 
 /** 异步模式时隐藏输出格式区块 */
@@ -1076,17 +1223,17 @@ function adjustCount(d) {
   if (next < 1 || next > cap) return;
   state.count = next;
   syncCountStepperUi();
+  syncComposerSummary();
 }
 
 function updateCharCount() {
-  const text = document.getElementById('prompt').value;
+  const text = getPromptValue();
   document.getElementById('charCount').textContent  = text.length;
   document.getElementById('tokenCount').textContent = Math.ceil(text.length / 2.5);
 }
 
 function clearPrompt() {
-  document.getElementById('prompt').value = '';
-  updateCharCount();
+  syncPromptValue('');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1144,6 +1291,44 @@ function updateToolbarBadge() {
   }
 }
 
+function historyPanelCardHtml(rec, src) {
+  return `
+    <div class="history-panel-card" data-rec-id="${escapeAttr(rec.id)}">
+      <div class="history-panel-thumb">${src ? `<img src="${escapeAttr(src)}" alt="" loading="lazy" />` : ''}</div>
+      <div class="history-panel-meta">
+        <div class="history-panel-prompt" title="${escapeAttr(rec.prompt || '')}">${esc(rec.prompt || '')}</div>
+        <div class="history-panel-tags">
+          <span>${esc(rec.size || '-')}</span>
+          <span>${esc(rec.quality || '-')}</span>
+          <span>${esc(rec.format || '-')}</span>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function renderHistoryPanel() {
+  const body = document.getElementById('historyPanelBody');
+  if (!body) return;
+  resetHistoryPanelObjectUrls();
+  const records = await db.getRecentRecordsByImageLimit(6).catch(() => []);
+  const flat = Array.isArray(records) ? records.filter(rec => rec?.images?.length) : [];
+  if (!flat.length) {
+    body.innerHTML = `<div class="history-panel-empty">暂无历史记录</div>`;
+    return;
+  }
+  const rows = await Promise.all(flat.slice(0, 6).map(async rec => {
+    const img = rec.images?.[0];
+    const row = await materializeStoredImage(img, rec.format);
+    if (row?.objectUrl) _historyPanelObjectUrls.push(row.objectUrl);
+    return { rec, src: row?.src || '' };
+  }));
+  body.innerHTML = rows.map(item => historyPanelCardHtml(item.rec, item.src)).join('');
+  body.querySelectorAll('.history-panel-card').forEach(card => {
+    const recId = card.dataset.recId;
+    card.addEventListener('click', () => void showImageDetail(recId, 0));
+  });
+}
+
 /** 友好时间：今天/昨天/前天/2026年5月8日 周五，附 HH:mm */
 function friendlyTime(ts) {
   if (!ts) return '';
@@ -1194,22 +1379,20 @@ function createChatRow(prompt, params) {
   const row = document.createElement('div');
   row.className = 'chat-row';
 
-  // Left: A avatar + images column
-  const leftSide = document.createElement('div');
-  leftSide.className = 'chat-left';
-  leftSide.innerHTML = `<div class="chat-avatar av-u">U</div>`;
+  const userHead = document.createElement('div');
+  userHead.className = 'chat-row-head chat-row-user';
+  userHead.innerHTML = `<div class="chat-avatar av-u"><img src="/assets/images/头像.jpg" alt="User"></div>${buildParamsBubble(prompt, params)}`;
+
+  const aiHead = document.createElement('div');
+  aiHead.className = 'chat-row-head chat-row-ai';
+  aiHead.innerHTML = `<div class="chat-avatar av-a">AI</div>`;
 
   const colImages = document.createElement('div');
   colImages.className = 'chat-col-images';
-  leftSide.appendChild(colImages);
 
-  // Right: bubble + U avatar
-  const rightSide = document.createElement('div');
-  rightSide.className = 'chat-right';
-  rightSide.innerHTML = `${buildParamsBubble(prompt, params)}<div class="chat-avatar av-a"><img src="/assets/images/头像.jpg" alt="AI"></div>`;
-
-  row.appendChild(rightSide);
-  row.appendChild(leftSide);
+  row.appendChild(userHead);
+  row.appendChild(aiHead);
+  row.appendChild(colImages);
   feed.appendChild(row);
 
   document.getElementById('emptyState').style.display = 'none';
@@ -1252,11 +1435,44 @@ function hideSkeletonInRow(row) {
 // ─────────────────────────────────────────────────────────────────────────────
 let _viewer = null;
 
-function openLightbox(srcs, initialIndex = 0) {
+function ensureViewerPagerButtons(viewer, total) {
+  if (!viewer?.viewer || total <= 1) return;
+  const host = viewer.viewer;
+  host.querySelectorAll('.viewer-nav-overlay').forEach(node => node.remove());
+
+  const makeButton = (direction, label, onClick) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `viewer-nav-overlay viewer-nav-${direction}`;
+    btn.setAttribute('aria-label', label);
+    btn.innerHTML = direction === 'prev' ? '&#8249;' : '&#8250;';
+    btn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onClick();
+    });
+    host.appendChild(btn);
+  };
+
+  makeButton('prev', '上一张', () => viewer.prev());
+  makeButton('next', '下一张', () => viewer.next());
+}
+
+function updateViewerPagerButtons(viewer) {
+  if (!viewer?.viewer) return;
+  const prevBtn = viewer.viewer.querySelector('.viewer-nav-prev');
+  const nextBtn = viewer.viewer.querySelector('.viewer-nav-next');
+  if (!prevBtn || !nextBtn) return;
+  prevBtn.disabled = viewer.index <= 0;
+  nextBtn.disabled = viewer.index >= viewer.length - 1;
+}
+
+function openLightbox(srcs, initialIndex = 0, options = {}) {
   if (_viewer) { _viewer.destroy(); _viewer = null; }
 
   const srcList = Array.isArray(srcs) ? srcs : [srcs];
   const idx = Math.max(0, Math.min(initialIndex, srcList.length - 1));
+  const showPagerArrows = options.showPagerArrows !== false;
 
   const container = document.createElement('ul');
   container.style.display = 'none';
@@ -1280,6 +1496,15 @@ function openLightbox(srcs, initialIndex = 0) {
       reset:       4,
       rotateLeft:  4,
       rotateRight: 4,
+    },
+    shown() {
+      if (showPagerArrows && srcList.length > 1) {
+        ensureViewerPagerButtons(_viewer, srcList.length);
+        updateViewerPagerButtons(_viewer);
+      }
+    },
+    viewed() {
+      updateViewerPagerButtons(_viewer);
     },
     hidden() {
       _viewer.destroy();
@@ -1470,6 +1695,109 @@ async function downloadImageRef(imageRef, fmt, idx) {
   setTimeout(() => revokeObjectUrl(url), 1000);
 }
 
+async function copyImageToClipboard(imageRef, fmt) {
+  if (!imageRef?.imageId) return;
+  const asset = await db.getImageAssetById(imageRef.imageId).catch(() => null);
+  if (!asset?.blob) {
+    toast('本地图片不存在或已损坏', 'error');
+    return;
+  }
+  if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+    toast('当前浏览器不支持图片复制', 'error');
+    return;
+  }
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ [asset.mime || imageMimeFromFormat(fmt)]: asset.blob })]);
+    toast('图片已复制到剪贴板', 'success');
+  } catch (error) {
+    toast(error.message || '复制失败', 'error');
+  }
+}
+
+async function toggleCollection(recordId, imageIndex, imageRef, fmt) {
+  if (!recordId || !imageRef?.imageId) return;
+  const key = collectionKey(recordId, imageIndex);
+  const existing = _collectionMap.get(key);
+  if (existing) {
+    const res = await fetch(`/api/collection/${encodeURIComponent(existing.id)}`, { method: 'DELETE' });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || json?.ok !== true) {
+      toast(json?.error || '取消收藏失败', 'error');
+      return;
+    }
+    await refreshCollections();
+    toast('已取消收藏', 'success');
+    return;
+  }
+
+  const rec = await getRecord(recordId);
+  const asset = await db.getImageAssetById(imageRef.imageId).catch(() => null);
+  if (!rec || !asset?.blob) {
+    toast('收藏所需图片数据不存在', 'error');
+    return;
+  }
+  const ext = fileExtFromMime(asset.mime || imageRef.mime, fmt);
+  const fd = new FormData();
+  fd.append('file', asset.blob, `favorite.${ext}`);
+  fd.append('recordId', recordId);
+  fd.append('imageIndex', String(imageIndex));
+  fd.append('prompt', rec.prompt || '');
+  fd.append('size', rec.size || '');
+  fd.append('quality', rec.quality || '');
+  fd.append('format', rec.format || fmt || '');
+  fd.append('savedAt', String(Date.now()));
+  const res = await fetch('/api/collection', { method: 'POST', body: fd });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || json?.ok !== true) {
+    toast(json?.error || '收藏失败', 'error');
+    return;
+  }
+  await refreshCollections();
+  toast(json?.duplicated ? '已在收藏中' : '已收藏到本地 collection 文件夹', 'success');
+}
+
+async function rerunRecord(recId) {
+  if (!recId) return;
+  const rec = await getRecord(recId);
+  if (!rec) return;
+  const asyncMode = rec.asyncMode || (rec.requestMode === 'async' ? 'async' : 'sync');
+  const prevMode = state.asyncMode;
+  const prevProviderId = state.selectedProviderId;
+  const prevCount = state.count;
+  const prevSize = state.size;
+  const prevQuality = state.quality;
+  const prevFormat = state.format;
+  const prevCompression = state.compression;
+  try {
+    state.asyncMode = asyncMode;
+    state.selectedProviderId = rec.providerId || state.selectedProviderId;
+    state.size = rec.size || state.size;
+    state.quality = rec.quality || state.quality;
+    state.format = rec.format || state.format;
+    state.count = Math.min(maxCount(), Math.max(1, rec.count || 1));
+    state.compression = rec.compression ?? state.compression;
+    syncCountStepperUi();
+    syncModeButtons();
+    syncFormatSection();
+    syncCompressionSection();
+    syncComposerSummary();
+    await generateWithPrompt(rec.prompt || '', state.compression);
+  } finally {
+    state.asyncMode = prevMode;
+    state.selectedProviderId = prevProviderId;
+    state.count = prevCount;
+    state.size = prevSize;
+    state.quality = prevQuality;
+    state.format = prevFormat;
+    state.compression = prevCompression;
+    syncCountStepperUi();
+    syncModeButtons();
+    syncFormatSection();
+    syncCompressionSection();
+    syncComposerSummary();
+  }
+}
+
 async function persistBlobImages(recordId, blobs, fallbackMime) {
   const storedImages = [];
   const preparedImages = [];
@@ -1572,6 +1900,7 @@ async function saveRecord(rec) {
   try {
     await db.putRecord(rec);
     markCacheSizeDirty();
+    void renderHistoryPanel();
     return true;
   } catch (e) {
     const q = e && e.name === 'QuotaExceededError';
@@ -1584,6 +1913,7 @@ async function deleteRecord(id) {
   if (!db.hasDb()) return;
   await db.deleteRecordById(id);
   markCacheSizeDirty();
+  void renderHistoryPanel();
 }
 
 function clearAllRecords() {
@@ -1603,6 +1933,7 @@ function clearAllRecords() {
     revokeObjectUrlsIn(feed);
     setEmptyState(true);
     document.getElementById('tokenInfo').style.display = 'none';
+    void renderHistoryPanel();
     await updateCacheSize();
     updateCumulativeTokens();
     toast('生成记录与待恢复任务已清除', 'info');
@@ -1727,6 +2058,7 @@ async function loadRecordsToCanvas() {
   document.getElementById('emptyState').style.display = 'none';
   document.getElementById('clearBtn').style.display   = 'inline-block';
   updateToolbarBadge();
+  void renderHistoryPanel();
 
   const rendered = document.getElementById('chatFeed').querySelectorAll('.image-card').length;
   document.getElementById('toolbarTitle').textContent =
@@ -1785,8 +2117,7 @@ function buildImageCard(src, imageRef, fmt, size, sw, sh, cw, recId, channel, id
   if (objectUrl) card.dataset.objectUrl = objectUrl;
 
   // Channel tag label & class
-  const chDef  = CHANNEL[channel] || CHANNEL.cnd;
-  const tagCls = '';
+  const favActive = isCollected(recId, idx);
 
   card.innerHTML = `
     <button class="card-del-btn" title="删除">✕</button>
@@ -1794,19 +2125,22 @@ function buildImageCard(src, imageRef, fmt, size, sw, sh, cw, recId, channel, id
       style="${size === 'auto' ? 'width:100%;display:block;height:auto;' : `aspect-ratio:${sw}/${sh};width:100%;display:block;object-fit:cover;`}" />
     <div class="image-card-footer">
       <span class="image-meta" title="${size.toLocaleUpperCase()} · ${fmt}">${size.toLocaleUpperCase()} · ${fmt}</span>
-      <span class="card-channel-tag${tagCls ? ' ' + tagCls : ''}">${chDef.name}</span>
       <div class="image-actions">
-        <button class="icon-btn" title="下载">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
-            <polyline points="7 10 12 15 17 10"/>
-            <line x1="12" y1="15" x2="12" y2="3"/>
+        <button class="icon-btn image-fav-btn${favActive ? ' active' : ''}" title="${favActive ? '取消收藏' : '收藏'}">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+            <path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>
           </svg>
         </button>
-        <button class="icon-btn" title="使用配置">
+        <button class="icon-btn image-copy-btn" title="复制">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
-            <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
+            <rect x="9" y="9" width="13" height="13" rx="2"/>
+            <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+          </svg>
+        </button>
+        <button class="icon-btn image-refresh-btn" title="刷新">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <polyline points="23 4 23 10 17 10"/>
+            <path d="M20.49 15A9 9 0 1 1 23 10"/>
           </svg>
         </button>
       </div>
@@ -1824,13 +2158,17 @@ function buildImageCard(src, imageRef, fmt, size, sw, sh, cw, recId, channel, id
     e.stopPropagation();
     void showImageDetail(card.dataset.recId, idx);
   });
-  card.querySelectorAll('.icon-btn')[0].addEventListener('click', e => {
+  card.querySelector('.image-copy-btn').addEventListener('click', e => {
     e.stopPropagation();
-    void downloadImageRef(imageRef, fmt, idx);
+    void copyImageToClipboard(imageRef, fmt);
   });
-  card.querySelectorAll('.icon-btn')[1].addEventListener('click', e => {
+  card.querySelector('.image-fav-btn').addEventListener('click', e => {
     e.stopPropagation();
-    void useConfig(card.dataset.recId);
+    void toggleCollection(recId, idx, imageRef, fmt);
+  });
+  card.querySelector('.image-refresh-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    void rerunRecord(card.dataset.recId);
   });
 
   return card;
@@ -2109,21 +2447,39 @@ function stopAllPendingPolls() {
 async function generate() {
   if (state.loading) return;
 
-  const prompt      = document.getElementById('prompt').value.trim();
-  const compression = parseInt(document.getElementById('compression').value);
+  await generateWithPrompt(
+    getPromptValue().trim(),
+    parseInt(document.getElementById('compression').value, 10),
+  );
+}
 
+async function generateWithPrompt(prompt, compression = state.compression) {
   if (!getProviderApiKey()) {
     toast('请先在设置中配置 API Key', 'error');
     openSettings();
     return;
   }
-  if (!prompt) { toast('请输入描述词', 'error'); return; }
+  if (!prompt) {
+    toast('请输入描述词', 'error');
+    return;
+  }
   if (!ensureProxyRuntimeReady()) return;
+
+  syncPromptValue(prompt);
 
   if (state.asyncMode === 'async') {
     await generateAsync(prompt, compression);
   } else {
     await generateSync(prompt, compression);
+  }
+}
+
+function setGenerateButtonsBusy(busy, label) {
+  for (const id of ['genBtn', 'sidebarGenBtn']) {
+    const btn = document.getElementById(id);
+    if (!btn) continue;
+    btn.disabled = busy;
+    btn.innerHTML = busy ? `<div class="spinner"></div> ${label}` : `${PLAY_ICON} 开始生成`;
   }
 }
 
@@ -2151,13 +2507,11 @@ async function generateSync(prompt, compression) {
   const ch  = CHANNEL.cnd;
   const provider = getSelectedProvider();
   const apiKey = getProviderApiKey(provider?.id);
-  const btn = document.getElementById('genBtn');
   const startedAt = Date.now();
 
   state.loading = true;
   showSyncGenerationToast();
-  btn.disabled  = true;
-  btn.innerHTML = '<div class="spinner"></div> 生成中…';
+  setGenerateButtonsBusy(true, '生成中…');
   document.getElementById('toolbarTitle').textContent = '正在生成，请稍候…';
 
   // 先创建对话行，放骨架屏
@@ -2236,6 +2590,8 @@ async function generateSync(prompt, compression) {
       id:          recId,
       ts:          Date.now(),
       channel:     state.channel,
+      asyncMode:   state.asyncMode,
+      providerId:  provider?.id || state.defaultProviderId,
       prompt,
       size:        state.size,
       quality:     state.quality,
@@ -2285,8 +2641,7 @@ async function generateSync(prompt, compression) {
   } finally {
     state.loading = false;
     hideSyncGenerationToast();
-    btn.disabled  = false;
-    btn.innerHTML = `${PLAY_ICON} 开始生成`;
+    setGenerateButtonsBusy(false);
   }
 }
 
@@ -2351,10 +2706,7 @@ async function generateAsync(prompt, compression) {
   const ch  = CHANNEL.cnd;
   const provider = getSelectedProvider();
   const apiKey = getProviderApiKey(provider?.id);
-  const btn = document.getElementById('genBtn');
-
-  btn.disabled  = true;
-  btn.innerHTML = '<div class="spinner"></div> 提交中…';
+  setGenerateButtonsBusy(true, '提交中…');
 
   let chatRow = null;
   let col = null;
@@ -2413,6 +2765,7 @@ async function generateAsync(prompt, compression) {
         cardId,
         batchId,
         channel: state.channel,
+        asyncMode: state.asyncMode,
         prompt,
         compression,
         params: {
@@ -2443,8 +2796,7 @@ async function generateAsync(prompt, compression) {
     toast(err.message || '提交失败，请检查 API Key 和网络', 'error');
     console.error('[generateAsync]', err);
   } finally {
-    btn.disabled  = false;
-    btn.innerHTML = `${PLAY_ICON} 开始生成`;
+    setGenerateButtonsBusy(false);
   }
 }
 
@@ -2549,6 +2901,8 @@ async function finishAsyncTask(taskId, poll, data, prompt, compression, usage) {
       id:          recId,
       ts:          Date.now(),
       channel:     'cnd',
+      asyncMode:   stored?.asyncMode || 'async',
+      providerId:  stored?.providerId || state.defaultProviderId,
       prompt:      stored?.prompt || prompt,
       size:        params.size,
       quality:     params.quality,
@@ -2802,7 +3156,7 @@ async function renderHistoryGallery(page, recordsInput = null) {
 // ─────────────────────────────────────────────────────────────────────────────
 function openPolishModal() {
   const editor = document.getElementById('polishEditor');
-  editor.innerText = document.getElementById('prompt').value || '';
+  editor.innerText = getPromptValue() || '';
   document.getElementById('polishModal').classList.add('open');
   syncPolishButtons();
   setTimeout(() => editor.focus(), 60);
@@ -2813,16 +3167,19 @@ function closePolishModal() {
 }
 
 function syncPolishButtons() {
-  const quickBtn = document.getElementById('quickPolishPromptBtn');
+  const quickBtns = [
+    document.getElementById('quickPolishPromptBtn'),
+    document.getElementById('quickPolishPromptBtnBottom'),
+  ].filter(Boolean);
   const runBtn = document.getElementById('polishRunBtn');
   const disabled = getPolishDisabledState({
     deepseekConfigured: state.deepseekConfigured,
     loading: _polishLoading,
   });
-  if (quickBtn) {
+  quickBtns.forEach(quickBtn => {
     quickBtn.disabled = disabled;
     quickBtn.querySelector('span').textContent = getPolishButtonLabel(_polishLoading);
-  }
+  });
   if (runBtn) {
     runBtn.disabled = disabled;
     runBtn.textContent = getPolishButtonLabel(_polishLoading);
@@ -2869,8 +3226,7 @@ async function quickPolishPrompt() {
 function applyPolishedPrompt() {
   const editor = document.getElementById('polishEditor');
   const text = normalizePolishText(editor.innerText || '');
-  document.getElementById('prompt').value = text;
-  updateCharCount();
+  syncPromptValue(text);
   closePolishModal();
   toast('已应用润色文本', 'success');
 }
@@ -2973,8 +3329,7 @@ async function useConfig(recId) {
   const rec = await getRecord(recId);
   if (!rec) return;
 
-  document.getElementById('prompt').value = rec.prompt;
-  updateCharCount();
+  syncPromptValue(rec.prompt);
 
   applySize(rec.size);
 
@@ -2990,6 +3345,7 @@ async function useConfig(recId) {
 
   state.count = Math.min(maxCount(), Math.max(1, rec.count || 1));
   syncCountStepperUi();
+  syncComposerSummary();
 
   toast('配置已应用', 'success');
 }
@@ -3022,6 +3378,7 @@ function renderRefImages() {
   if (!state.refImages.length) {
     el.style.display = 'none';
     el.innerHTML     = '';
+    syncComposerSummary();
     return;
   }
   el.style.display = 'flex';
@@ -3049,4 +3406,5 @@ function renderRefImages() {
       removeRefImage(i);
     });
   });
+  syncComposerSummary();
 }

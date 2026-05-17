@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { ROOT_DIR, ROUTES, UPLOAD_DIR, parseRuntimeConfig } from './config.js';
+import { COLLECTION_DIR, ROOT_DIR, ROUTES, UPLOAD_DIR, parseRuntimeConfig } from './config.js';
 import { setStaticCacheHeaders } from './cache.js';
 import { fetchWithTimeout } from './fetch.js';
 import { assertProviderSupportsAction, buildPollUrl, getProxyTarget, readRequestMetadata, requestWantsStream, resolveProvider } from './proxy.js';
@@ -28,11 +28,13 @@ export function createApp(options = {}) {
 
   app.use(express.static(ROOT_DIR, { setHeaders: setStaticCacheHeaders }));
   app.use('/uploads', express.static(UPLOAD_DIR));
+  app.use('/collection', express.static(COLLECTION_DIR));
 
   if (startupTasks) {
     void cleanupExpiredUploads(UPLOAD_DIR, {
       retentionDays: runtimeConfig.uploadRetentionDays,
     });
+    void ensureCollectionDir();
   }
 
   app.get(ROUTES.runtimeConfig, (_req, res) => {
@@ -67,6 +69,86 @@ export function createApp(options = {}) {
     const relativePath = `${location.relativeDir.split(path.sep).join('/')}/${location.filename}`;
     const publicUrl = `${req.protocol}://${req.get('host')}/uploads/${relativePath}`;
     res.json({ ok: true, url: publicUrl });
+  });
+
+  app.get(ROUTES.collection, async (_req, res) => {
+    try {
+      const manifest = await readCollectionManifest();
+      res.json({ ok: true, items: manifest.items || [] });
+    } catch (error) {
+      res.status(500).json({ ok: false, error: error.message || '读取收藏失败' });
+    }
+  });
+
+  app.post(ROUTES.collection, upload.single('file'), async (req, res) => {
+    try {
+      const file = req.file;
+      if (!file) {
+        res.status(400).json({ ok: false, error: '缺少收藏图片文件' });
+        return;
+      }
+
+      const validation = validateCollectionUploadFile(file);
+      if (!validation.ok) {
+        res.status(400).json({ ok: false, error: validation.reason });
+        return;
+      }
+
+      const manifest = await readCollectionManifest();
+      const recordId = String(req.body?.recordId || '').trim();
+      const imageIndex = Number.parseInt(String(req.body?.imageIndex || '0'), 10) || 0;
+      const existing = manifest.items.find(item => item.recordId === recordId && item.imageIndex === imageIndex);
+      if (existing) {
+        res.json({ ok: true, item: existing, duplicated: true });
+        return;
+      }
+
+      const savedAt = Number.parseInt(String(req.body?.savedAt || Date.now()), 10) || Date.now();
+      const stamp = formatCollectionStamp(savedAt);
+      const ext = path.extname(file.originalname || '').toLowerCase() || mimeExt(file.mimetype);
+      const filename = await allocateCollectionFilename(stamp, ext);
+      await fs.writeFile(path.join(COLLECTION_DIR, filename), file.buffer);
+
+      const item = {
+        id: filename,
+        filename,
+        url: `/collection/${filename}`,
+        savedAt,
+        prompt: String(req.body?.prompt || '').trim(),
+        size: String(req.body?.size || '').trim(),
+        quality: String(req.body?.quality || '').trim(),
+        format: String(req.body?.format || '').trim(),
+        recordId,
+        imageIndex,
+      };
+      manifest.items.unshift(item);
+      await writeCollectionManifest(manifest);
+      res.json({ ok: true, item });
+    } catch (error) {
+      res.status(500).json({ ok: false, error: error.message || '保存收藏失败' });
+    }
+  });
+
+  app.delete(`${ROUTES.collection}/:id`, async (req, res) => {
+    try {
+      const id = path.basename(String(req.params.id || '').trim());
+      if (!id) {
+        res.status(400).json({ ok: false, error: '缺少收藏 ID' });
+        return;
+      }
+      const manifest = await readCollectionManifest();
+      const nextItems = manifest.items.filter(item => item.id !== id);
+      if (nextItems.length === manifest.items.length) {
+        res.status(404).json({ ok: false, error: '收藏不存在' });
+        return;
+      }
+      manifest.items = nextItems;
+      await writeCollectionManifest(manifest);
+      await fs.unlink(path.join(COLLECTION_DIR, id)).catch(() => {});
+      res.json({ ok: true, id });
+    } catch (error) {
+      res.status(500).json({ ok: false, error: error.message || '删除收藏失败' });
+    }
   });
 
   app.post(ROUTES.imageSync, imageSyncBodyParser, async (req, res) => {
@@ -250,6 +332,74 @@ function imageSyncBodyParser(req, res, next) {
     return;
   }
   express.text({ type: 'application/json', limit: '10mb' })(req, res, next);
+}
+
+async function ensureCollectionDir() {
+  await fs.mkdir(COLLECTION_DIR, { recursive: true });
+}
+
+async function readCollectionManifest() {
+  await ensureCollectionDir();
+  const manifestPath = path.join(COLLECTION_DIR, 'manifest.json');
+  try {
+    const raw = await fs.readFile(manifestPath, 'utf8');
+    const json = JSON.parse(raw);
+    if (!json || !Array.isArray(json.items)) return { items: [] };
+    return json;
+  } catch {
+    return { items: [] };
+  }
+}
+
+async function writeCollectionManifest(manifest) {
+  await ensureCollectionDir();
+  const manifestPath = path.join(COLLECTION_DIR, 'manifest.json');
+  await fs.writeFile(manifestPath, `${JSON.stringify({ items: manifest.items || [] }, null, 2)}\n`);
+}
+
+async function allocateCollectionFilename(stamp, ext) {
+  await ensureCollectionDir();
+  let name = `${stamp}${ext}`;
+  let full = path.join(COLLECTION_DIR, name);
+  let suffix = 2;
+  while (true) {
+    try {
+      await fs.access(full);
+      name = `${stamp}-${suffix}${ext}`;
+      full = path.join(COLLECTION_DIR, name);
+      suffix += 1;
+    } catch {
+      return name;
+    }
+  }
+}
+
+function formatCollectionStamp(ts) {
+  const d = new Date(ts);
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  return `${mm}-${dd}-${hh}-${mi}`;
+}
+
+function mimeExt(mime) {
+  const m = String(mime || '').toLowerCase();
+  if (m === 'image/jpeg' || m === 'image/jpg') return '.jpg';
+  if (m === 'image/webp') return '.webp';
+  return '.png';
+}
+
+function validateCollectionUploadFile(file) {
+  if (!file || Number(file.size || 0) <= 0) {
+    return { ok: false, reason: '无效的收藏文件' };
+  }
+  const mime = String(file.mimetype || '').toLowerCase().trim();
+  const extOk = /\.(jpe?g|png|webp)$/i.test(String(file.originalname || ''));
+  if (!['image/jpeg', 'image/png', 'image/webp', 'image/pjpeg'].includes(mime) && !extOk) {
+    return { ok: false, reason: '仅支持 JPG、PNG、WEBP 图片' };
+  }
+  return { ok: true };
 }
 
 function getAuthorizationHeader(req) {

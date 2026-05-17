@@ -17,7 +17,7 @@ pnpm-debug.log*
 # Uploads and generated runtime data
 uploads/*
 !uploads/.gitignore
-
+collection/
 # Test and coverage artifacts
 coverage/
 .nyc_output/

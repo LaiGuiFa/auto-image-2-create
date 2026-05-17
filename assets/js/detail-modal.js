@@ -27,6 +27,16 @@ function renderParamRows(model) {
   `).join('');
 }
 
+function renderRecordMeta(model) {
+  const items = [
+    model.resolution ? `分辨率 ${escapeHtml(model.resolution)}` : '',
+    model.duration ? `生成时长 ${escapeHtml(model.duration)}` : '',
+  ].filter(Boolean);
+
+  if (!items.length) return '';
+  return `<div class="detail-section-meta">${items.join('<span class="detail-section-meta-gap"></span>')}</div>`;
+}
+
 export function renderDetailModalHtml(model) {
   return `
     <div class="detail-layout">
@@ -44,18 +54,9 @@ export function renderDetailModalHtml(model) {
       </section>
       <section class="detail-meta">
         <div class="detail-section">
-          <h3>记录信息</h3>
-          <div class="detail-param-row">
-            <div class="detail-param-label">状态</div>
-            <div class="detail-param-value"><strong>${escapeHtml(model.status || '未知')}</strong></div>
-          </div>
-          <div class="detail-param-row">
-            <div class="detail-param-label">分辨率</div>
-            <div class="detail-param-value"><strong>${escapeHtml(model.resolution || '未知')}</strong></div>
-          </div>
-          <div class="detail-param-row">
-            <div class="detail-param-label">生成时长</div>
-            <div class="detail-param-value">${escapeHtml(model.duration || '未知')}</div>
+          <div class="detail-section-head">
+            <h3>记录信息</h3>
+            ${renderRecordMeta(model)}
           </div>
         </div>
         <div class="detail-section">
@@ -68,7 +69,7 @@ export function renderDetailModalHtml(model) {
         </div>
         ${model.showRevisedPrompt ? `
           <div class="detail-section">
-            <h3>上游改写后 Prompt</h3>
+            <h3>自动优化</h3>
             <pre class="detail-text-block">${escapeHtml(model.revisedPrompt)}</pre>
           </div>
         ` : ''}
