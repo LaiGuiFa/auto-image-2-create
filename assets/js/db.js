@@ -5,6 +5,7 @@ import {
   DB_NAME,
   DB_VER,
   DB_STORE,
+  DB_QUEUE_STORE,
   DB_RECORDS_STORE,
   DB_KV_STORE,
   DB_IMAGES_STORE,
@@ -21,6 +22,15 @@ function dbOpen() {
       const oldVersion = e.oldVersion || 0;
       if (!db.objectStoreNames.contains(DB_STORE)) {
         db.createObjectStore(DB_STORE, { keyPath: 'taskId' });
+      }
+      let queueStore = null;
+      if (!db.objectStoreNames.contains(DB_QUEUE_STORE)) {
+        queueStore = db.createObjectStore(DB_QUEUE_STORE, { keyPath: 'id' });
+      } else {
+        queueStore = req.transaction.objectStore(DB_QUEUE_STORE);
+      }
+      if (queueStore && !queueStore.indexNames.contains('createdAt')) {
+        queueStore.createIndex('createdAt', 'createdAt', { unique: false });
       }
       let recordsStore = null;
       if (!db.objectStoreNames.contains(DB_RECORDS_STORE)) {
@@ -74,6 +84,17 @@ function dbRecordsRun(mode, fn) {
     const req   = fn(store);
     req.onsuccess = () => resolve(req.result);
     req.onerror   = () => reject(req.error);
+  });
+}
+
+function dbQueueRun(mode, fn) {
+  if (!_db) return Promise.resolve(null);
+  return new Promise((resolve, reject) => {
+    const tx = _db.transaction(DB_QUEUE_STORE, mode);
+    const store = tx.objectStore(DB_QUEUE_STORE);
+    const req = fn(store);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
   });
 }
 
@@ -132,6 +153,53 @@ async function clearRecords() {
 
 async function clearPendingTasks() {
   return dbRun('readwrite', s => s.clear());
+}
+
+async function putQueueTask(task) {
+  return dbQueueRun('readwrite', s => s.put(task));
+}
+
+async function getQueueTaskById(id) {
+  if (!id) return null;
+  const r = await dbQueueRun('readonly', s => s.get(id));
+  return r || null;
+}
+
+async function deleteQueueTask(id) {
+  if (!id) return null;
+  return dbQueueRun('readwrite', s => s.delete(id));
+}
+
+async function clearQueueTasks() {
+  return dbQueueRun('readwrite', s => s.clear());
+}
+
+async function getQueueTasksSorted() {
+  if (!_db) return [];
+  return new Promise((resolve, reject) => {
+    const tx = _db.transaction(DB_QUEUE_STORE, 'readonly');
+    const store = tx.objectStore(DB_QUEUE_STORE);
+    if (!store.indexNames.contains('createdAt')) {
+      store.getAll().onsuccess = e => {
+        const rows = Array.isArray(e.target.result) ? e.target.result : [];
+        rows.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+        resolve(rows);
+      };
+      return;
+    }
+    const req = store.index('createdAt').openCursor();
+    const rows = [];
+    req.onsuccess = () => {
+      const cur = req.result;
+      if (!cur) {
+        resolve(rows);
+        return;
+      }
+      rows.push(cur.value);
+      cur.continue();
+    };
+    req.onerror = () => reject(req.error);
+  });
 }
 
 async function putImageAsset(asset) {
@@ -362,6 +430,11 @@ export default {
   deleteRecordById,
   clearRecords,
   clearPendingTasks,
+  putQueueTask,
+  getQueueTaskById,
+  deleteQueueTask,
+  clearQueueTasks,
+  getQueueTasksSorted,
   putImageAsset,
   getImageAssetById,
   deleteImageAssetById,

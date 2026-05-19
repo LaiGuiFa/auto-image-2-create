@@ -1,4 +1,4 @@
-export const VERSION = '1.5.17';
+export const VERSION = '1.5.18';
 
 export const KV_ASYNC_MODE = 'cnd_ai_async_mode';
 export const KV_ASYNC_DISABLED = 'cnd_ai_async_disabled';
@@ -11,8 +11,9 @@ export const KV_RELEASE_ACK_VERSION = 'cnd_ai_release_ack_version';
 export const RELEASE_JSON_PATH = 'release.json';
 
 export const DB_NAME = 'cnd_ai_image';
-export const DB_VER = 4;
+export const DB_VER = 5;
 export const DB_STORE = 'pending_tasks';
+export const DB_QUEUE_STORE = 'queue_tasks';
 export const DB_RECORDS_STORE = 'records';
 export const DB_KV_STORE = 'kv';
 export const DB_IMAGES_STORE = 'record_images';

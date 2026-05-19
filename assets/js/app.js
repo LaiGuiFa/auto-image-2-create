@@ -1,4 +1,4 @@
-import {
+﻿import {
   VERSION,
   CHANNEL,
   KV_ASYNC_MODE,
@@ -47,6 +47,7 @@ import { createDetailRecordPayload } from './detail-record.js?v=20260515-detail-
 import { bindDetailModalEvents, renderDetailModal } from './detail-modal.js?v=20260515-detail-info';
 import { getReferenceImageAddState, makeHistoryReferenceImage } from './ref-images.js?v=20260515-detail-info';
 import { normalizePolishText } from './prompt-polish.js?v=20260515-polish';
+import { buildQueueTaskRequestInit } from './task-queue-request.js';
 import { normalizeRuntimeConfig, getProviderById } from './runtime-config.js';
 import {
   KV_SELECTED_PROVIDER,
@@ -59,6 +60,8 @@ import {
   getPolishDisabledState,
   readPolishResponseText,
 } from './prompt-polish-ui.js';
+import { createQueueTaskSnapshot, createTaskQueueController } from './task-queue.js';
+import { renderTaskQueueInto } from './task-queue-ui.js';
 import db from './db.js';
 import Viewer from '/vendor/viewerjs/viewer.esm.js';
 
@@ -89,6 +92,7 @@ const state = {
   /** 与生成记录分离，内存镜像 + `kv` 持久化 */
   usageStats: { input: 0, output: 0, total: 0 },
   pendingPolls: new Map(), // taskId → { timerId, attempts, cardId, finalizeState }
+  queueTasks: [],
 };
 
 /** 异步模式单次最多 4 张（多任务提交）；同步模式最多 10 张（n 参数） */
@@ -132,6 +136,7 @@ let _asyncFinalizeRunning = false;
 const _asyncFinalizeQueue = [];
 const _detailState = createDetailState();
 let _detailRecordCache = null;
+let _taskQueueController = null;
 
 // Cached example data
 
@@ -286,6 +291,38 @@ function syncCollectionStarStates() {
   });
 }
 
+function syncTaskQueue(tasks) {
+  state.queueTasks = Array.isArray(tasks) ? [...tasks] : [];
+  const container = document.getElementById('taskQueueList');
+  if (container) renderTaskQueueInto(container, state.queueTasks, {
+    onDeleteTask: deleteQueueTaskById,
+  });
+}
+
+async function persistQueueTask(task) {
+  await db.putQueueTask(task);
+  markCacheSizeDirty();
+}
+
+async function deleteQueueTaskPersisted(taskId) {
+  await db.deleteQueueTask(taskId);
+  markCacheSizeDirty();
+}
+
+async function loadQueueTasks() {
+  const rows = await db.getQueueTasksSorted().catch(() => []);
+  syncTaskQueue(rows);
+  return rows;
+}
+
+async function deleteQueueTaskById(taskId) {
+  const controller = initTaskQueueController();
+  const removed = await controller.removeTask(taskId);
+  if (removed) {
+    toast('任务已移除', 'info');
+  }
+}
+
 function getSelectedProvider() {
   return resolveSelectedProvider({
     providers: state.providers,
@@ -296,10 +333,6 @@ function getSelectedProvider() {
 
 function getProviderApiKey(providerId = state.selectedProviderId) {
   return state.keys[providerId] || '';
-}
-
-function canUseAsyncForProvider(provider = getSelectedProvider()) {
-  return provider?.supportsAsync !== false;
 }
 
 async function loadRuntimeConfigState() {
@@ -366,10 +399,7 @@ async function hydrateProviderSettings() {
 }
 
 function resolveProviderAwareAsyncMode(mode) {
-  const provider = getSelectedProvider();
-  return canUseAsyncForProvider(provider)
-    ? resolveAllowedAsyncMode(mode, state.asyncDisabled)
-    : 'sync';
+  return resolveAllowedAsyncMode(mode, state.asyncDisabled);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -441,11 +471,10 @@ function resolveProviderAwareAsyncMode(mode) {
   updateCumulativeTokens();
   void renderHistoryPanel();
   await refreshCollections();
+  initTaskQueueController();
+  await _taskQueueController.restoreAndStart();
 
   await maybeShowReleaseNotes();
-
-  // Resume pending async tasks (page-reload recovery)
-  await resumePendingTasks();
 
   // Final scroll after all rows (completed + pending) are in the DOM
   requestAnimationFrame(() => scrollToLatest(true));
@@ -677,8 +706,7 @@ async function setAsyncMode(mode, showToast = false) {
 }
 
 function syncModeButtons() {
-  const provider = getSelectedProvider();
-  const disabled = isAsyncModeDisabled(state.asyncDisabled) || !canUseAsyncForProvider(provider);
+  const disabled = isAsyncModeDisabled(state.asyncDisabled);
   document.querySelectorAll('#asyncModeSeg [data-async-mode]').forEach(b => {
     const isAsyncBtn = b.dataset.asyncMode === 'async';
     b.classList.toggle('active', b.dataset.asyncMode === state.asyncMode);
@@ -1924,6 +1952,7 @@ function clearAllRecords() {
       if (db.hasDb()) {
         await db.clearRecords();
         await db.clearPendingTasks();
+        await db.clearQueueTasks();
         await db.clearImageAssets();
       }
     } catch (_) { /* ignore */ }
@@ -1934,6 +1963,7 @@ function clearAllRecords() {
     setEmptyState(true);
     document.getElementById('tokenInfo').style.display = 'none';
     void renderHistoryPanel();
+    syncTaskQueue([]);
     await updateCacheSize();
     updateCumulativeTokens();
     toast('生成记录与待恢复任务已清除', 'info');
@@ -2468,7 +2498,10 @@ async function generateWithPrompt(prompt, compression = state.compression) {
   syncPromptValue(prompt);
 
   if (state.asyncMode === 'async') {
-    await generateAsync(prompt, compression);
+    const controller = initTaskQueueController();
+    const task = buildQueueTaskFromCurrentState(prompt, compression);
+    await controller.enqueueTask(task);
+    toast('任务已加入队列', 'info');
   } else {
     await generateSync(prompt, compression);
   }
@@ -2498,6 +2531,139 @@ function resolveSizeForChannel(size, channelId) {
   if (channelId !== 'cnd') return size;
   if (!size || size === 'auto' || size.includes('x')) return size || 'auto';
   return CND_RATIO_TO_PX[size] || '1024x1024';
+}
+
+function snapshotRefImages(refImages) {
+  return (Array.isArray(refImages) ? refImages : []).map(img => ({ ...img }));
+}
+
+function buildQueueTaskFromCurrentState(prompt, compression) {
+  return createQueueTaskSnapshot({
+    id: genId(),
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    status: 'queued',
+    prompt,
+    providerId: getSelectedProvider()?.id || state.defaultProviderId,
+    params: {
+      size: state.size,
+      quality: state.quality,
+      format: state.format,
+      count: state.count,
+      compression,
+      moderation: state.moderation,
+      streamEnabled: state.streamEnabled,
+    },
+    refImages: snapshotRefImages(state.refImages),
+  });
+}
+
+async function executeGenerationTask(task, options = {}) {
+  const provider = getProviderById(state.providers, task.providerId) || getSelectedProvider();
+  const apiKey = getProviderApiKey(provider?.id);
+  const { requestInit, body, providerId, hasRefs } = await buildQueueTaskRequestInit(task, {
+    endpoint: CHANNEL.cnd.endpoint,
+    apiKey,
+    resolveSizeForChannel,
+    buildReferenceEditFormData,
+  });
+  const startedAt = Date.now();
+  const refImages = snapshotRefImages(task.refImages || []);
+
+  const res = await fetch(CHANNEL.cnd.endpoint, requestInit);
+  let json;
+  if (body.stream && res.headers.get('content-type')?.includes('text/event-stream')) {
+    json = await parseStreamResponse(res);
+  } else {
+    json = await res.json();
+    if (!res.ok) throw new Error(json?.error?.message || `HTTP ${res.status}`);
+  }
+
+  const recId = genId();
+  const mime = imageMimeFromFormat(task.params?.format || state.format);
+  const blobs = [];
+  for (const item of json.data || []) {
+    if (!item?.b64_json) continue;
+    blobs.push(base64ToBlob(item.b64_json, mime));
+    if ((json.data || []).length > 1) await nextPaint();
+  }
+  const { storedImages, preparedImages } = await persistBlobImages(recId, blobs, mime);
+  const rec = {
+    id: recId,
+    ts: Date.now(),
+    channel: state.channel,
+    asyncMode: 'async',
+    providerId,
+    prompt: task.prompt,
+    size: task.params?.size || state.size,
+    quality: task.params?.quality || state.quality,
+    format: task.params?.format || state.format,
+    compression: task.params?.compression ?? options.compression ?? 100,
+    count: task.params?.count || 1,
+    images: storedImages,
+    usage: json.usage || null,
+    ...createDetailRecordPayload({
+      prompt: task.prompt,
+      size: task.params?.size || state.size,
+      quality: task.params?.quality || state.quality,
+      format: task.params?.format || state.format,
+      count: task.params?.count || 1,
+      durationMs: Date.now() - startedAt,
+      result: {
+        actualParams: collectUpstreamActualParams(json),
+        revisedPrompts: collectRevisedPrompts(json.data),
+      },
+    }),
+  };
+  const saved = await saveRecord(rec);
+  if (!saved) {
+    await deleteStoredImageRefs(storedImages);
+    preparedImages.forEach(item => revokeObjectUrl(item.objectUrl));
+    throw new Error('本地记录保存失败');
+  }
+
+  return {
+    record: rec,
+    preparedImages,
+    usage: json.usage || null,
+    data: json.data || [],
+  };
+}
+
+function renderCompletedQueueTask(result) {
+  const rec = result.record;
+  const feed = document.getElementById('chatFeed');
+  const row = createChatRow(rec.prompt, {
+    size: rec.size,
+    quality: rec.quality,
+    format: rec.format,
+    channel: rec.channel || 'cnd',
+    count: rec.count || 1,
+    ts: rec.ts,
+  });
+  feed.appendChild(row);
+  renderImagesInRow(row, result.preparedImages, rec.format, rec.size, rec.id, rec.channel || 'cnd', result.usage);
+  void accumulateUsageStats(result.usage);
+  document.getElementById('emptyState').style.display = 'none';
+  document.getElementById('toolbarTitle').textContent = '生成完成';
+  scrollToLatest();
+}
+
+function initTaskQueueController() {
+  if (_taskQueueController) return _taskQueueController;
+  _taskQueueController = createTaskQueueController({
+    loadTasks: loadQueueTasks,
+    persistTask: persistQueueTask,
+    deleteTask: deleteQueueTaskPersisted,
+    onTaskChange: async (tasks) => {
+      syncTaskQueue(tasks);
+    },
+    onTaskDone: async (_task, result) => {
+      renderCompletedQueueTask(result);
+    },
+    executeTask: async (task) => executeGenerationTask(task),
+  });
+  return _taskQueueController;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3408,3 +3574,5 @@ function renderRefImages() {
   });
   syncComposerSummary();
 }
+
+
