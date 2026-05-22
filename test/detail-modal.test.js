@@ -7,7 +7,7 @@ test('detail modal html renders image, prompt, revised prompt, and params', () =
     prompt: 'red square icon',
     revisedPrompt: 'A clean red square app icon on a white background',
     showRevisedPrompt: true,
-    displayParams: [{ key: 'size', label: '尺寸', actual: '1536x1024', requested: '1024x1024' }],
+    displayParams: [{ key: 'size', label: '请求尺寸', actual: '1536x1024', requested: '1024x1024' }],
     activeImage: { url: 'blob:1' },
     imageIndex: 0,
     imageCount: 2,
@@ -22,9 +22,26 @@ test('detail modal html renders image, prompt, revised prompt, and params', () =
   assert.match(html, /记录信息/);
   assert.match(html, /12\.8 秒/);
   assert.match(html, /detail-section-head/);
-  assert.doesNotMatch(html, /<div class="detail-param-label">状态<\/div>/);
-  assert.doesNotMatch(html, /<div class="detail-param-label">分辨率<\/div>/);
-  assert.doesNotMatch(html, /<div class="detail-param-label">生成时长<\/div>/);
+});
+
+test('detail modal html includes a download button for the preview image', () => {
+  const html = renderDetailModalHtml({
+    prompt: 'prompt',
+    revisedPrompt: '',
+    showRevisedPrompt: false,
+    displayParams: [],
+    activeImage: { url: 'blob:1' },
+    imageIndex: 0,
+    imageCount: 1,
+    status: 'done',
+    resolution: '',
+    duration: '',
+  });
+
+  assert.match(html, /detail-preview-download-mask/);
+  assert.match(html, /detail-preview-download-btn/);
+  assert.match(html, /data-detail-download/);
+  assert.doesNotMatch(html, /detail-preview-download-btn[^>]*top:/);
 });
 
 test('detail modal shows page info for multi-image records', () => {

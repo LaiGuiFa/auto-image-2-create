@@ -1640,6 +1640,31 @@ body {
   line-height: 1.5;
 }
 
+.download-dir-section {
+  margin-top: 14px;
+}
+
+.download-dir-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.download-dir-row .btn-ghost {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.download-dir-input-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.download-dir-input-wrap input[readonly] {
+  cursor: default;
+  color: var(--text-muted);
+}
+
 .modal-footer {
   padding: 12px 20px 16px;
   display: flex;
@@ -1815,11 +1840,55 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 16px;
   min-height: 320px;
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   background: #0f1117;
   padding: 14px;
+}
+
+.detail-preview-download-mask {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.detail-preview-download-btn {
+  width: 68px;
+  height: 68px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(15, 17, 23, 0.46);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.92);
+  transition: opacity 0.18s ease, transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.detail-preview-stage.has-image:hover .detail-preview-download-btn,
+.detail-preview-stage.has-image .detail-preview-download-btn.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: scale(1);
+}
+
+.detail-preview-download-btn:hover {
+  border-color: var(--border-hover);
+  background: rgba(20, 23, 31, 0.62);
+}
+
+.detail-preview-download-btn svg {
+  width: 32px;
+  height: 32px;
 }
 
 .detail-preview-image {
@@ -2106,6 +2175,34 @@ body {
   padding: 16px;
   text-align: center;
   line-height: 1.5;
+}
+
+.history-search-wrap {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  padding: 0 14px;
+  min-width: 0;
+}
+
+.history-search-input {
+  width: min(420px, 100%);
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface2);
+  color: var(--text);
+  padding: 0 12px;
+  font-size: 13px;
+  outline: none;
+}
+
+.history-search-input::placeholder {
+  color: var(--text-dim);
+}
+
+.history-search-input:focus {
+  border-color: var(--accent);
 }
 
 .btn-ghost:disabled {

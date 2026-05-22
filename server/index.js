@@ -1,9 +1,12 @@
 import 'dotenv/config';
+import { execFile } from 'node:child_process';
 import express from 'express';
 import multer from 'multer';
 import { Blob } from 'node:buffer';
+import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import { COLLECTION_DIR, ROOT_DIR, ROUTES, UPLOAD_DIR, parseRuntimeConfig } from './config.js';
@@ -18,11 +21,13 @@ const upload = multer({
 });
 
 const PORT = Number(process.env.PORT || 8000);
+const execFileAsync = promisify(execFile);
 
 export function createApp(options = {}) {
   const runtimeConfig = options.runtimeConfig || parseRuntimeConfig();
   const fetchImpl = options.fetchImpl || fetch;
   const startupTasks = options.startupTasks !== false;
+  const pickDownloadDirectoryImpl = options.pickDownloadDirectory || pickDownloadDirectory;
 
   const app = express();
 
@@ -51,7 +56,7 @@ export function createApp(options = {}) {
   app.post(ROUTES.upload, upload.single('file'), async (req, res) => {
     const file = req.file;
     if (!file) {
-      res.status(400).json({ ok: false, error: '璇烽€夋嫨瑕佷笂浼犵殑鍥剧墖' });
+      res.status(400).json({ ok: false, error: '请选择要上传的图片' });
       return;
     }
 
@@ -151,6 +156,51 @@ export function createApp(options = {}) {
     }
   });
 
+  app.post(ROUTES.downloadDirectoryPick, async (_req, res) => {
+    try {
+      const selectedPath = await pickDownloadDirectoryImpl();
+      if (!selectedPath) {
+        res.json({ ok: false, cancelled: true });
+        return;
+      }
+      res.json({ ok: true, path: selectedPath });
+    } catch (error) {
+      res.status(error?.status || 500).json({
+        ok: false,
+        error: error.message || '选择下载路径失败',
+      });
+    }
+  });
+
+  app.post(ROUTES.downloadImage, upload.single('file'), async (req, res) => {
+    try {
+      const file = req.file;
+      if (!file) {
+        res.status(400).json({ ok: false, error: '缺少图片文件' });
+        return;
+      }
+
+      const validation = validateCollectionUploadFile(file);
+      if (!validation.ok) {
+        res.status(400).json({ ok: false, error: validation.reason });
+        return;
+      }
+
+      const targetDir = normalizeDownloadDirectory(req.body?.targetDir);
+      await assertWritableDirectory(targetDir);
+      const ext = path.extname(file.originalname || '').toLowerCase() || mimeExt(file.mimetype);
+      const filename = sanitizeDownloadFilename(req.body?.filename, ext);
+      const finalPath = await allocateDownloadFilename(targetDir, filename);
+      await fs.writeFile(finalPath, file.buffer);
+      res.json({ ok: true, path: finalPath });
+    } catch (error) {
+      res.status(error?.status || 500).json({
+        ok: false,
+        error: error.message || '保存图片失败',
+      });
+    }
+  });
+
   app.post(ROUTES.imageSync, imageSyncBodyParser, async (req, res) => {
     const auth = getAuthorizationHeader(req);
     if (!auth) {
@@ -235,7 +285,7 @@ export function createApp(options = {}) {
   app.get(ROUTES.imagePoll, async (req, res) => {
     const taskId = String(req.query.task_id || '').trim();
     if (!taskId) {
-      res.status(400).json({ ok: false, error: '缂哄皯浠诲姟 ID' });
+      res.status(400).json({ ok: false, error: '缺少任务 ID' });
       return;
     }
 
@@ -273,7 +323,7 @@ export function createApp(options = {}) {
 
     const text = String(req.body?.text || req.body?.prompt || '').trim();
     if (!text) {
-      res.status(400).json({ ok: false, error: '缂哄皯娑﹁壊鏂囨湰' });
+      res.status(400).json({ ok: false, error: '缺少润色文本' });
       return;
     }
 
@@ -402,6 +452,92 @@ function validateCollectionUploadFile(file) {
   return { ok: true };
 }
 
+async function pickDownloadDirectory() {
+  if (process.platform !== 'win32') {
+    const error = new Error('当前系统暂不支持从服务端打开目录选择器');
+    error.status = 501;
+    throw error;
+  }
+  const script = [
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+    'Add-Type -AssemblyName System.Windows.Forms',
+    '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
+    "$dialog.Description = '选择图片下载保存路径'",
+    '$dialog.ShowNewFolderButton = $true',
+    'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath }',
+  ].join('; ');
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-STA', '-Command', script], {
+    windowsHide: false,
+    timeout: 120000,
+  });
+  return String(stdout || '').trim();
+}
+
+function normalizeDownloadDirectory(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    const error = new Error('请先设置下载保存路径');
+    error.status = 400;
+    throw error;
+  }
+  const resolved = path.resolve(raw);
+  if (!path.isAbsolute(raw) || resolved !== raw) {
+    const error = new Error('下载保存路径必须是绝对路径');
+    error.status = 400;
+    throw error;
+  }
+  return resolved;
+}
+
+async function assertWritableDirectory(dir) {
+  let stat = null;
+  try {
+    stat = await fs.stat(dir);
+  } catch {
+    const error = new Error('下载保存路径不存在');
+    error.status = 400;
+    throw error;
+  }
+  if (!stat.isDirectory()) {
+    const error = new Error('下载保存路径不是文件夹');
+    error.status = 400;
+    throw error;
+  }
+  try {
+    await fs.access(dir, fsConstants.W_OK);
+  } catch {
+    const error = new Error('下载保存路径不可写');
+    error.status = 400;
+    throw error;
+  }
+}
+
+function sanitizeDownloadFilename(value, fallbackExt = '.png') {
+  const raw = path.basename(String(value || '').trim());
+  const safe = raw.replace(/[<>:"/\\|?*\x00-\x1F]/g, '-').replace(/\s+/g, ' ').trim();
+  const ext = path.extname(safe) || fallbackExt || '.png';
+  const stem = path.basename(safe, path.extname(safe)).trim() || `gpt-image-${Date.now()}`;
+  return `${stem}${ext}`;
+}
+
+async function allocateDownloadFilename(dir, filename) {
+  const ext = path.extname(filename);
+  const stem = path.basename(filename, ext);
+  let name = filename;
+  let full = path.join(dir, name);
+  let suffix = 2;
+  while (true) {
+    try {
+      await fs.access(full);
+      name = `${stem}-${suffix}${ext}`;
+      full = path.join(dir, name);
+      suffix += 1;
+    } catch {
+      return full;
+    }
+  }
+}
+
 function getAuthorizationHeader(req) {
   const value = req.get('authorization');
   return typeof value === 'string' && value.trim() ? value.trim() : '';
@@ -447,10 +583,10 @@ function handleUpstreamError(error, res) {
 
   const detail = error instanceof Error
     ? [error.message, error.cause?.message].filter(Boolean).join(': ')
-    : '涓婃父鏈嶅姟璇锋眰澶辫触';
+    : '上游服务请求失败';
   res.status(502).json({
     ok: false,
-    error: detail || '涓婃父鏈嶅姟璇锋眰澶辫触',
+    error: detail || '上游服务请求失败',
   });
 }
 

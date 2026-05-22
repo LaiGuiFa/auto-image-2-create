@@ -10,6 +10,8 @@ export const COLLECTION_DIR = path.join(ROOT_DIR, 'collection');
 export const ROUTES = {
   upload: '/api/upload',
   collection: '/api/collection',
+  downloadDirectoryPick: '/api/download-directory/pick',
+  downloadImage: '/api/download-image',
   runtimeConfig: '/api/runtime-config',
   imageSync: '/api/image/sync',
   imageAsync: '/api/image/async',

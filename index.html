@@ -352,6 +352,16 @@
           </label>
         </div>
 
+        <div class="download-dir-section">
+          <div class="modal-field-label">下载保存路径</div>
+          <div class="download-dir-row">
+            <button type="button" class="btn-ghost" id="pickDownloadDirBtn">选择保存路径</button>
+            <div class="input-wrap download-dir-input-wrap">
+              <input type="text" id="downloadDirInput" placeholder="未设置时使用浏览器默认下载位置" readonly />
+            </div>
+          </div>
+        </div>
+
         <div class="modal-note" style="margin-top:10px;">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
             style="flex-shrink:0">
@@ -429,6 +439,9 @@
           <polyline points="12 6 12 12 16 14"/>
         </svg>
         <h2>生成历史</h2>
+        <div class="history-search-wrap">
+          <input type="search" id="historySearchInput" class="history-search-input" placeholder="搜索提示词" autocomplete="off" />
+        </div>
         <button class="modal-close" id="historyCloseBtn">✕</button>
       </div>
       <div class="modal-body modal-gallery-body" id="historyModalBody"></div>

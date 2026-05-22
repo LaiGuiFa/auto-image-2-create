@@ -46,7 +46,18 @@ export function renderDetailModalHtml(model) {
           <span class="detail-page-info">${model.imageCount ? `${model.imageIndex + 1} / ${model.imageCount}` : '0 / 0'}</span>
           <button type="button" class="detail-nav-btn" data-detail-nav="next" ${model.imageCount <= 1 || model.imageIndex >= model.imageCount - 1 ? 'disabled' : ''}>下一张</button>
         </div>
-        <div class="detail-preview-stage">
+        <div class="detail-preview-stage${model.activeImage?.url ? ' has-image' : ''}">
+          ${model.activeImage?.url ? `
+            <div class="detail-preview-download-mask" aria-hidden="true">
+              <button type="button" class="detail-preview-download-btn" data-detail-download title="下载">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                  <polyline points="7 10 12 15 17 10"/>
+                  <line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+              </button>
+            </div>
+          ` : ''}
           ${model.activeImage?.url
             ? `<img class="detail-preview-image" src="${escapeHtml(model.activeImage.url)}" alt="">`
             : '<div class="detail-preview-empty">图片不可用</div>'}
@@ -65,7 +76,7 @@ export function renderDetailModalHtml(model) {
         </div>
         <div class="detail-section">
           <h3>原始 Prompt</h3>
-          <pre class="detail-text-block">${escapeHtml(model.prompt || '(无)')}</pre>
+          <pre class="detail-text-block">${escapeHtml(model.prompt || '(空)')}</pre>
         </div>
         ${model.showRevisedPrompt ? `
           <div class="detail-section">
@@ -84,8 +95,62 @@ export function renderDetailModal({ modalBody, record, imageIndex }) {
   return model;
 }
 
-export function bindDetailModalEvents({ modalEl, modalBody, getRecordById, detailState, onClose }) {
+export function bindDetailModalEvents({ modalEl, modalBody, getRecordById, detailState, onClose, onDownloadImage }) {
+  let hoverTimer = null;
+  let hoverTarget = null;
+
+  function clearHoverTimer() {
+    if (hoverTimer) {
+      clearTimeout(hoverTimer);
+      hoverTimer = null;
+    }
+    hoverTarget = null;
+  }
+
+  function setPreviewDownloadVisible(visible) {
+    const btn = modalBody.querySelector('[data-detail-download]');
+    if (!btn) return;
+    btn.classList.toggle('is-visible', visible);
+  }
+
+  modalBody.addEventListener('mousemove', (event) => {
+    const stage = event.target.closest('.detail-preview-stage');
+    if (!stage) {
+      clearHoverTimer();
+      setPreviewDownloadVisible(false);
+      return;
+    }
+    if (stage.contains(event.target)) {
+      if (!hoverTimer && hoverTarget !== stage) {
+        hoverTarget = stage;
+        hoverTimer = setTimeout(() => {
+          setPreviewDownloadVisible(true);
+          hoverTimer = null;
+        }, 500);
+      }
+      return;
+    }
+    clearHoverTimer();
+    setPreviewDownloadVisible(false);
+  });
+
+  modalBody.addEventListener('mouseleave', () => {
+    clearHoverTimer();
+    setPreviewDownloadVisible(false);
+  });
+
   modalBody.addEventListener('click', (event) => {
+    const downloadBtn = event.target.closest('[data-detail-download]');
+    if (downloadBtn) {
+      const snapshot = detailState.getSnapshot();
+      const record = getRecordById(snapshot.recordId);
+      const activeImage = record?.images?.[snapshot.imageIndex];
+      if (activeImage && typeof onDownloadImage === 'function') {
+        onDownloadImage(activeImage, record?.format, snapshot.imageIndex);
+      }
+      return;
+    }
+
     const nav = event.target.closest('[data-detail-nav]');
     if (!nav) return;
 

@@ -4,6 +4,7 @@
   KV_ASYNC_MODE,
   KV_ASYNC_DISABLED,
   KV_USAGE_STATS,
+  KV_DOWNLOAD_DIR,
   KV_BUNDLED_VERSION,
   KV_RELEASE_ACK_VERSION,
   RELEASE_JSON_PATH,
@@ -46,6 +47,7 @@ import { createDetailState } from './detail-state.js?v=20260515-detail-info';
 import { createDetailRecordPayload } from './detail-record.js?v=20260515-detail-info';
 import { bindDetailModalEvents, renderDetailModal } from './detail-modal.js?v=20260515-detail-info';
 import { getReferenceImageAddState, makeHistoryReferenceImage } from './ref-images.js?v=20260515-detail-info';
+import { filterHistoryRecordsByPrompt } from './history-gallery.js?v=20260522-history-search';
 import { normalizePolishText } from './prompt-polish.js?v=20260515-polish';
 import { buildQueueTaskRequestInit } from './task-queue-request.js';
 import { normalizeRuntimeConfig, getProviderById } from './runtime-config.js';
@@ -91,6 +93,7 @@ const state = {
   streamEnabled: false,    // 当前接口：流式 + partial_images
   /** 与生成记录分离，内存镜像 + `kv` 持久化 */
   usageStats: { input: 0, output: 0, total: 0 },
+  downloadDir: '',
   pendingPolls: new Map(), // taskId → { timerId, attempts, cardId, finalizeState }
   queueTasks: [],
 };
@@ -123,6 +126,7 @@ let _refUploadBusy = false;
 let _activeSyncRow = null;
 let _historyGalleryPage = 1;
 let _historyRecords = null;
+let _historySearchQuery = '';
 let _historyModalObjectUrls = [];
 let _historyPanelObjectUrls = [];
 let _collectionItems = [];
@@ -429,6 +433,7 @@ function resolveProviderAwareAsyncMode(mode) {
       if (savedMode === 'sync' || savedMode === 'async') state.asyncMode = savedMode;
       const asyncDisabledRaw = await db.kvGet(KV_ASYNC_DISABLED);
       state.asyncDisabled = asyncDisabledRaw === 'true';
+      state.downloadDir = String(await db.kvGet(KV_DOWNLOAD_DIR) || '').trim();
       state.asyncMode = resolveProviderAwareAsyncMode(state.asyncMode);
       // Sync mode-specific size vars from restored state (these fields are new, not in DB)
       if (state.sizeMode === 'pixel') {
@@ -498,6 +503,7 @@ function wireEvents() {
   document.getElementById('saveSettingsBtn').addEventListener('click', () => void saveSettings());
   document.getElementById('clearKeyBtn').addEventListener('click', () => void clearCurrentKey());
   document.getElementById('clearRecordsBtn').addEventListener('click', clearAllRecords);
+  document.getElementById('pickDownloadDirBtn').addEventListener('click', () => void pickDownloadDirectory());
   document.getElementById('providerSelect').addEventListener('change', syncSettingsDraftProvider);
   document.getElementById('disableAsyncToggle').addEventListener('change', () => {
     if (_settingsDraft) _settingsDraft.asyncDisabled = document.getElementById('disableAsyncToggle').checked;
@@ -639,6 +645,7 @@ function wireEvents() {
     modalBody: document.getElementById('detailModalBody'),
     detailState: _detailState,
     getRecordById: (recordId) => (_detailRecordCache?.id === recordId ? _detailRecordCache : null),
+    onDownloadImage: (imageRef, fmt, idx) => void downloadImageRef(imageRef, fmt, idx),
     onClose: () => {
       resetDetailModalObjectUrls();
       _detailRecordCache = null;
@@ -962,6 +969,7 @@ function openSettings() {
     providerId: state.selectedProviderId,
     keys: { ...state.keys },
     asyncDisabled: state.asyncDisabled,
+    downloadDir: state.downloadDir,
   };
   syncSettingsModalUi();
   void updateCacheSize();
@@ -990,6 +998,30 @@ function syncSettingsModalUi() {
   providerSelect.value = _settingsDraft.providerId;
   document.getElementById('modalCndKey').value = _settingsDraft.keys[_settingsDraft.providerId] || '';
   document.getElementById('disableAsyncToggle').checked = _settingsDraft.asyncDisabled;
+  document.getElementById('downloadDirInput').value = _settingsDraft.downloadDir || '';
+}
+
+async function pickDownloadDirectory() {
+  if (!_settingsDraft) return;
+  const btn = document.getElementById('pickDownloadDirBtn');
+  try {
+    if (btn) btn.disabled = true;
+    const res = await fetch('/api/download-directory/pick', { method: 'POST' });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || json?.ok !== true) {
+      if (json?.cancelled) return;
+      toast(json?.error || '选择下载路径失败', 'error');
+      return;
+    }
+    const dir = String(json.path || '').trim();
+    if (!dir) return;
+    _settingsDraft.downloadDir = dir;
+    document.getElementById('downloadDirInput').value = dir;
+  } catch (error) {
+    toast(error.message || '选择下载路径失败', 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function saveSettings() {
@@ -1008,6 +1040,7 @@ async function saveSettings() {
   state.keys = { ...state.keys, ..._settingsDraft.keys };
   state.selectedProviderId = provider?.id || state.defaultProviderId;
   state.asyncDisabled = asyncDisabled;
+  state.downloadDir = String(_settingsDraft.downloadDir || '').trim();
 
   try {
     await Promise.all(state.providers.map(async ({ id }) => {
@@ -1017,6 +1050,8 @@ async function saveSettings() {
     }));
     await db.kvSet(KV_ASYNC_DISABLED, String(asyncDisabled));
     await db.kvSet(KV_SELECTED_PROVIDER, state.selectedProviderId);
+    if (state.downloadDir) await db.kvSet(KV_DOWNLOAD_DIR, state.downloadDir);
+    else await db.kvRemove(KV_DOWNLOAD_DIR);
     await db.kvRemove('cnd_ai_use_proxy');
   } catch (e) {
     toast(e.message || '设置保存失败', 'error');
@@ -1715,10 +1750,30 @@ async function downloadImageRef(imageRef, fmt, idx) {
     toast('本地图片不存在或已损坏', 'error');
     return;
   }
+  const ext = fileExtFromMime(asset.mime || imageRef.mime, fmt);
+  const filename = `gpt-image-${Date.now()}-${idx + 1}.${ext}`;
+  if (state.downloadDir) {
+    const fd = new FormData();
+    fd.append('file', asset.blob, filename);
+    fd.append('targetDir', state.downloadDir);
+    fd.append('filename', filename);
+    try {
+      const res = await fetch('/api/download-image', { method: 'POST', body: fd });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json?.ok !== true) {
+        toast(json?.error || '保存图片失败', 'error');
+        return;
+      }
+      toast(`已保存到 ${json.path || state.downloadDir}`, 'success');
+    } catch (error) {
+      toast(error.message || '保存图片失败', 'error');
+    }
+    return;
+  }
   const url = URL.createObjectURL(asset.blob);
   const a  = document.createElement('a');
   a.href   = url;
-  a.download = `gpt-image-${Date.now()}-${idx + 1}.${fileExtFromMime(asset.mime || imageRef.mime, fmt)}`;
+  a.download = filename;
   a.click();
   setTimeout(() => revokeObjectUrl(url), 1000);
 }
@@ -2156,6 +2211,13 @@ function buildImageCard(src, imageRef, fmt, size, sw, sh, cw, recId, channel, id
     <div class="image-card-footer">
       <span class="image-meta" title="${size.toLocaleUpperCase()} · ${fmt}">${size.toLocaleUpperCase()} · ${fmt}</span>
       <div class="image-actions">
+        <button class="icon-btn image-download-btn" title="下载">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+        </button>
         <button class="icon-btn image-fav-btn${favActive ? ' active' : ''}" title="${favActive ? '取消收藏' : '收藏'}">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none">
             <path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>
@@ -2187,6 +2249,10 @@ function buildImageCard(src, imageRef, fmt, size, sw, sh, cw, recId, channel, id
   card.querySelector('.image-meta').addEventListener('click', e => {
     e.stopPropagation();
     void showImageDetail(card.dataset.recId, idx);
+  });
+  card.querySelector('.image-download-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    void downloadImageRef(imageRef, fmt, idx);
   });
   card.querySelector('.image-copy-btn').addEventListener('click', e => {
     e.stopPropagation();
@@ -3194,6 +3260,10 @@ function flattenHistoryItems(records) {
   return flat;
 }
 
+function filterHistoryRecords(records, query) {
+  return filterHistoryRecordsByPrompt(records, query);
+}
+
 function historyGalleryCardHtml(item, src) {
   const { rec, imgIdx } = item;
   if (!rec.images?.[imgIdx] || !src) return '';
@@ -3207,7 +3277,7 @@ function historyGalleryCardHtml(item, src) {
         <div class="modal-gallery-title" title="${escapeAttr(rec.prompt)}">${esc(rec.prompt)}</div>
         <div class="modal-gallery-sub">${esc(rec.size)} · ${esc(rec.quality)} · ${esc(rec.format)}</div>
         <div class="modal-gallery-actions">
-          <button type="button" class="btn-ghost modal-gallery-action-btn hist-copy-prompt">复制提示词</button>
+          <button type="button" class="btn-ghost modal-gallery-action-btn hist-download">下载</button>
           <button type="button" class="btn-ghost modal-gallery-action-btn hist-use-config">使用配置</button>
           <button type="button" class="btn-ghost modal-gallery-action-btn hist-add-ref">添加参考图</button>
         </div>
@@ -3217,6 +3287,7 @@ function historyGalleryCardHtml(item, src) {
 
 function bindHistoryGalleryCards(body, records, srcMap) {
   const recordMap = new Map(records.map(rec => [rec.id, rec]));
+
   body.querySelectorAll('.modal-gallery-card').forEach(card => {
     const recId = card.dataset.recId;
     const imgIdx = parseInt(card.dataset.imgIdx, 10);
@@ -3242,10 +3313,11 @@ function bindHistoryGalleryCards(body, records, srcMap) {
       void showImageDetail(recId, imgIdx);
     });
 
-    card.querySelector('.hist-copy-prompt').addEventListener('click', e => {
+    card.querySelector('.hist-download').addEventListener('click', e => {
       e.stopPropagation();
-      if (!rec) return;
-      navigator.clipboard.writeText(rec.prompt).then(() => toast('提示词已复制', 'success'));
+      const imageRef = rec.images?.[imgIdx];
+      if (!imageRef) return;
+      void downloadImageRef(imageRef, rec.format, imgIdx);
     });
 
     card.querySelector('.hist-use-config').addEventListener('click', e => {
@@ -3267,9 +3339,10 @@ async function renderHistoryGallery(page, recordsInput = null) {
     closeHistoryModal();
     return;
   }
-  const flat = flattenHistoryItems(records);
+  const filteredRecords = filterHistoryRecords(records, _historySearchQuery);
+  const flat = flattenHistoryItems(filteredRecords);
   if (!flat.length) {
-    closeHistoryModal();
+    body.innerHTML = `<div class="history-panel-empty">暂无匹配记录</div>`;
     return;
   }
 
@@ -3314,7 +3387,17 @@ async function renderHistoryGallery(page, recordsInput = null) {
     next.addEventListener('click', () => void renderHistoryGallery(p + 1));
   }
 
-  bindHistoryGalleryCards(body, records, srcMap);
+  bindHistoryGalleryCards(body, filteredRecords, srcMap);
+}
+
+function bindHistorySearchInput() {
+  const input = document.getElementById('historySearchInput');
+  if (!input || input.dataset.bound === '1') return;
+  input.dataset.bound = '1';
+  input.addEventListener('input', () => {
+    _historySearchQuery = input.value || '';
+    void renderHistoryGallery(1);
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3407,13 +3490,20 @@ async function openHistoryModal() {
 
   setHistoryRecords(records);
   _historyGalleryPage = 1;
+  _historySearchQuery = '';
   await renderHistoryGallery(1, records);
   document.getElementById('historyModal').classList.add('open');
+  bindHistorySearchInput();
+  const input = document.getElementById('historySearchInput');
+  if (input) input.value = '';
 }
 
 function closeHistoryModal() {
   setHistoryRecords(null);
   resetHistoryModalObjectUrls();
+  _historySearchQuery = '';
+  const input = document.getElementById('historySearchInput');
+  if (input) input.value = '';
   document.getElementById('historyModal').classList.remove('open');
 }
 

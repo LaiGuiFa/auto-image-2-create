@@ -3,6 +3,7 @@ export const VERSION = '1.5.18';
 export const KV_ASYNC_MODE = 'cnd_ai_async_mode';
 export const KV_ASYNC_DISABLED = 'cnd_ai_async_disabled';
 export const KV_USAGE_STATS = 'cnd_ai_usage_stats';
+export const KV_DOWNLOAD_DIR = 'cnd_ai_download_dir';
 /** 当前加载的前端 `VERSION`（每次启动写入，便于对照） */
 export const KV_BUNDLED_VERSION = 'cnd_ai_bundled_version';
 /** 用户已确认「已读」的 release.json 版本号；小于该版本的更新说明不再弹 */

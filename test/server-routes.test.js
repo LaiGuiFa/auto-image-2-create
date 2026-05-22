@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import { createApp } from '../server/index.js';
 
@@ -428,6 +431,57 @@ test('sync route preserves SSE passthrough in direct mode', async () => {
     assert.equal(res.headers.get('cache-control'), 'no-cache');
     assert.equal(res.headers.get('x-accel-buffering'), 'no');
     assert.match(await res.text(), /\[DONE\]/);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test('download directory picker returns the selected absolute path', async () => {
+  const chosen = path.join(os.tmpdir(), `image2-download-${Date.now()}`);
+  const app = createApp({
+    runtimeConfig,
+    startupTasks: false,
+    pickDownloadDirectory: async () => chosen,
+  });
+  const { server, baseUrl } = await listen(app);
+
+  try {
+    const res = await fetch(`${baseUrl}/api/download-directory/pick`, {
+      method: 'POST',
+    });
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), {
+      ok: true,
+      path: chosen,
+    });
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test('download image route writes files to the selected absolute directory', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'image2-download-save-'));
+  const app = createApp({ runtimeConfig, startupTasks: false });
+  const { server, baseUrl } = await listen(app);
+
+  try {
+    const form = new FormData();
+    form.append('targetDir', dir);
+    form.append('filename', 'gpt-image-test.png');
+    form.append('file', new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }), 'gpt-image-test.png');
+
+    const res = await fetch(`${baseUrl}/api/download-image`, {
+      method: 'POST',
+      body: form,
+    });
+
+    assert.equal(res.status, 200);
+    const json = await res.json();
+    assert.equal(json.ok, true);
+    assert.match(json.path, new RegExp(`^${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\\\/]gpt-image-test\\.png$`));
+    const saved = await fs.readFile(json.path);
+    assert.deepEqual([...saved], [1, 2, 3]);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
