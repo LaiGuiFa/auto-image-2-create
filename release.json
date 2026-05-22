@@ -1,5 +1,19 @@
 [
   {
+    "version": "1.5.22",
+    "update_time": "2026-05-22",
+    "update_content": [
+      {
+        "type": "add",
+        "text": "新增图片下载按钮，历史记录、图片详情和生成卡片均可直接下载"
+      },
+      {
+        "type": "add",
+        "text": "设置中新增下载保存路径选择，未设置时继续使用浏览器默认下载位置"
+      }
+    ]
+  },
+  {
     "version": "1.5.18",
     "update_time": "2026-05-19",
     "update_content": [
