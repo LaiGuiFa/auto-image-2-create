@@ -1,5 +1,19 @@
 [
   {
+    "version": "1.6.1",
+    "update_time": "2026-06-01",
+    "update_content": [
+      {
+        "type": "add",
+        "text": "在项目中新增专用的 skills 目录，将核心生图逻辑完全拆分解耦"
+      },
+      {
+        "type": "optimize",
+        "text": "skills 内部配置完全独立于主项目（携带 .env.example），支持快速打包给 OpenClaw 等 Agent 工具直接调用"
+      }
+    ]
+  },
+  {
     "version": "1.5.22",
     "update_time": "2026-05-22",
     "update_content": [
