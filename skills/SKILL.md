@@ -1,9 +1,11 @@
-# 生图工具 (Image Generator Skill)
+---
+name: image2-skill
+description: 使用多通道生图引擎生成高质量图片，返回图片的绝对物理存储路径。
+---
+
+# 生图工具 (image2-skill)
 
 使用多通道 AI 生图引擎（支持 OpenAI 兼容接口，例如 carrotbot 等）进行高画质图片生成。
-
-## 关联文件
-* 核心执行脚本: [generate.js](file:///e:/github/image2/skills/generate.js)
 
 ## 参数说明
 
@@ -29,7 +31,7 @@
 ```json
 {
   "prompt": "Cyberpunk city street, neon lights, rainy night, highly detailed",
-  "providerId": "image2",
+  "providerId": "openai",
   "size": "512x512"
 }
 ```
@@ -46,4 +48,3 @@
   "local_path": "/你的物理目录/skills/image/image-1780293016394.png"
 }
 ```
-

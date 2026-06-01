@@ -3,16 +3,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// 获取脚本当前目录及项目根目录
+// 获取脚本当前目录
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const PROJECT_ROOT = path.resolve(__dirname, '..');
 
 // 优先基于当前脚本所在目录去加载 .env
 dotenv.config({ path: path.join(__dirname, '.env') });
-
-import { parseRuntimeConfig } from '../server/config.js';
-import { resolveProvider, getProxyTarget } from '../server/proxy.js';
 
 // 统一输出 JSON 到标准输出，供 Agent 解析
 function outputResult(data) {
@@ -26,7 +22,60 @@ function exitWithError(message, details = null) {
     error: message,
     details: details
   });
-  process.exit(0); // 即使失败也返回 0，让 Agent 能安全解析 JSON 错误体
+  process.exit(0);
+}
+
+// ==========================================
+// 原来外部依赖的配置解析逻辑，现在直接内聚为 Skill 自包含
+// ==========================================
+function parseRuntimeConfig() {
+  const env = process.env;
+  const raw = typeof env.IMAGE_PROVIDERS_JSON === 'string' ? env.IMAGE_PROVIDERS_JSON.trim() : '';
+  if (!raw) {
+    throw new Error('IMAGE_PROVIDERS_JSON is required');
+  }
+
+  let providers;
+  try {
+    providers = JSON.parse(raw);
+  } catch {
+    throw new Error('IMAGE_PROVIDERS_JSON is malformed');
+  }
+
+  if (!Array.isArray(providers) || providers.length === 0) {
+    throw new Error('IMAGE_PROVIDERS_JSON must be a non-empty array');
+  }
+
+  const defaultProviderId = String(env.IMAGE_DEFAULT_PROVIDER_ID || '').trim();
+  if (!defaultProviderId) {
+    throw new Error('IMAGE_DEFAULT_PROVIDER_ID is required');
+  }
+
+  return {
+    providers,
+    defaultProviderId
+  };
+}
+
+function resolveProvider(runtimeConfig, providerId) {
+  const requestedId = String(providerId || '').trim();
+  if (requestedId) {
+    const requested = runtimeConfig.providers.find((provider) => provider.id === requestedId);
+    if (!requested) {
+      throw new Error(`未找到图像服务：${requestedId}`);
+    }
+    return requested;
+  }
+  return runtimeConfig.providers.find((provider) => provider.id === runtimeConfig.defaultProviderId)
+    || runtimeConfig.providers[0];
+}
+
+function getProxyTarget(provider) {
+  const left = String(provider.baseUrl || '').replace(/\/+$/, '');
+  const right = String(provider.syncPath || '');
+  if (!left) return right;
+  if (!right) return left;
+  return right.startsWith('/') ? `${left}${right}` : `${left}/${right}`;
 }
 
 async function main() {
@@ -38,16 +87,14 @@ async function main() {
       if (rawArg.trim().startsWith('{')) {
         inputArgs = JSON.parse(rawArg);
       } else {
-        // 如果不是 JSON，精确过滤掉所有以 '--' 开头的选项，并跳过对应选项的值（如 --provider）
         const promptArgs = [];
         for (let i = 2; i < process.argv.length; i++) {
           const arg = process.argv[i];
           if (arg.startsWith('--')) {
-            // 如果是 --provider，则不仅过滤自身，还要跳过下一个值，并将其存入 providerId
             if (arg === '--provider') {
               if (process.argv[i + 1] && !process.argv[i + 1].startsWith('--')) {
                 inputArgs.providerId = process.argv[i + 1];
-                i++; // 跳过下一个参数值
+                i++;
               }
             }
             continue;
@@ -76,7 +123,6 @@ async function main() {
     exitWithError('加载系统配置文件失败，请检查 .env。', err.message);
   }
 
-  // 命令行如果没有显式指定 --provider，则完全依赖环境变量中的默认提供商设置
   const providerId = inputArgs.providerId || runtimeConfig.defaultProviderId;
   if (!providerId) {
     exitWithError('未检测到默认的生图通道。请在参数中传入 --provider，或在 .env 中设置 IMAGE_DEFAULT_PROVIDER_ID。');
@@ -89,7 +135,7 @@ async function main() {
   let targetUrl;
   try {
     provider = resolveProvider(runtimeConfig, providerId);
-    targetUrl = getProxyTarget(provider, 'sync');
+    targetUrl = getProxyTarget(provider);
   } catch (err) {
     exitWithError(`解析提供商 [${providerId}] 失败。`, err.message);
   }
@@ -104,7 +150,6 @@ async function main() {
     n: 1
   };
 
-  // 这里的 API Key 从当前系统 .env 或进程环境变量中读取
   const apiKey = process.env.IMAGE_API_KEY;
   if (!apiKey) {
     exitWithError('未检测到生图所需的 API 密钥，请在同目录下的 .env 中配置 IMAGE_API_KEY。');
@@ -130,10 +175,8 @@ async function main() {
     if (respData.data && respData.data.length > 0) {
       const b64 = respData.data[0].b64_json;
       if (b64) {
-        // 解码并保存图片
         const buffer = Buffer.from(b64.replace(/^data:image\/\w+;base64,/, ""), 'base64');
         
-        // 保存至当前脚本所在目录下的 image 文件夹中，以保证独立移植性
         const skillImageDir = path.join(__dirname, 'image');
         await fs.mkdir(skillImageDir, { recursive: true });
         
@@ -141,12 +184,11 @@ async function main() {
         const localPath = path.join(skillImageDir, filename);
         await fs.writeFile(localPath, buffer);
 
-        // 输出成功结果
         outputResult({
           success: true,
           provider: providerId,
           prompt: prompt,
-          local_path: localPath.replace(/\\/g, '/') // 转换为通用斜杠路径方便展示
+          local_path: localPath.replace(/\\/g, '/')
         });
       } else {
         exitWithError('响应的 data[0] 中没有 b64_json 生图数据');
